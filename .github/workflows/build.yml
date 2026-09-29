@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install X11 / GL headers
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl-dev
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Package
+        run: |
+          ver="${GITHUB_REF_NAME//\//-}"
+          name="jev-jelly-${ver}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp jelly README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          echo "PKG=dist/$name.tar.gz" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jev-jelly-linux-${{ matrix.arch }}
+          path: ${{ env.PKG }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" \
+            --title "jev-jelly $GITHUB_REF_NAME" --generate-notes

@@ -1,0 +1,4 @@
+build/
+/jelly
+third_party/sysroot/
+third_party/lib/
