@@ -1,104 +1,227 @@
 [![build](https://github.com/jstdlee/jev-jelly/actions/workflows/build.yml/badge.svg)](https://github.com/jstdlee/jev-jelly/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/jstdlee/jev-jelly)](https://github.com/jstdlee/jev-jelly/releases/latest)
+
+<img src="assets/jev-jelly-256.png" width="96" align="right" alt="the Jelly icon">
 
 # jev-jelly
 
-A little jelly friend that hops slowly and randomly around your X11 desktop.
-It has no window frame or title bar, and clicks go through everywhere except its body.
+A squishy jelly friend that lives on your desktop: it hops around, wobbles when you poke it, stretches when you pull
+it, reminds you of what's coming up on your calendar, and chats with you through your own language model. It has
+no window frame, and clicks go through everywhere except its body. Linux (X11) and Windows 10 / 11.
 
-- **Pinch & pull**: the spot you grab stretches out toward the cursor with a thinning neck. Past the stretch limit the
-  body gets towed along. Let go and the lump snaps back and the whole body ripples. **Throw** it: it glides and splats
-  off screen edges.
+![The jelly with a reminder, the settings panel and the upcoming events](docs/gallery/hero.png)
+
+## Gallery
+
+| | |
+|---|---|
+| ![Chat: questions queue up while it thinks; each answer under its question](docs/gallery/chat.png) | ![Test all: every service and tool the settings depend on](docs/gallery/services.png) |
+| **Chat.** Ask more while it's thinking: questions queue up, then each answer comes back under its question. `r` reply, `n` / `p` next and previous. | **Test all.** One click checks everything the settings depend on: green works, yellow needs attention, gray is off or not installed. |
+
+![The LLM tab: route prompts, the router model, jev, search and the agent](docs/gallery/llm-tabs.png)
+
+**The LLM tab:** one prompt per route (Quick shown), the router model, jev (SystemOne), web search and the agent.
+
+![The Chat and Calendar tabs](docs/gallery/chat-calendar-tabs.png)
+
+*(Screenshots come from the app itself, saving its own surfaces with their transparency: see "Debugging" below.
+The calendar in them is made up.)*
+
+## Features
+
+### The jelly
+
+- **Pinch & pull**: the spot you grab stretches toward the cursor with a thinning neck. Past the stretch limit the
+  body is towed along. Let go and the lump snaps back and ripples. **Throw** it: it glides and splats off the
+  screen edges.
 - **Put it somewhere** (drag and let go) and it stays there quietly for 5 minutes before wandering again. In a
-  corner it naps for those 5 minutes (zzz).
-- **Moods:** it gets *curious* when your cursor comes close (stops, stretches up, big eyes). Leave the cursor still
-  and it tilts its head with a **?**. It *smiles* after gentle pets and *laughs* when tickled or poked 2–3 times. It
-  sometimes *hurries* to a far spot in quick low hops with sweat drops and dust. On ordinary walks it sometimes
-  stops to *look back* over its shoulder.
-- **Click** to poke (poke 4× fast and it gets dizzy). **Wiggle the cursor** over it to pet it (hearts).
-- **Calendar reminders:** add your calendar's secret iCal link (right-click → Calendar reminders → *Paste link*).
-  The jelly checks the next 48 hours every 10 minutes. When you're at the desk (mouse or keyboard used in the last
-  minute), an upcoming event appears beside it as solid words, each word in its own slowly shifting color, and
-  pixel-dissolves in and out. Click the words to dismiss them; otherwise they go out after
-  10 minutes. Japanese, Chinese and Korean titles are supported (Noto Sans CJK). Each event is shown at most
-  three times:
-  - a heads-up, anywhere from 70 minutes to 48 hours ahead, at most one every 20–40 minutes
-  - one when it's 15–70 minutes away
-  - one when it's about to start
+  corner it naps (zzz).
+- **Moods:** *curious* when your cursor comes close (stops, stretches up, big eyes); a head tilt and a **?** if
+  the cursor stays still; *smiles* after gentle pets and *laughs* when tickled or poked; sometimes *hurries* to a
+  far spot with sweat drops and dust; now and then *looks back* over its shoulder.
+- **Click** to poke (four quick pokes make it dizzy). **Wiggle the cursor** over it to pet it (hearts).
+- Boy / Girl, two face styles, 7 flavors or any color, opacity, stretchiness, pull reach and size, all live.
 
-  Recurring events, exceptions, cancellations, time zones and all-day events are handled.
-  *Google Calendar:* Settings → your calendar → Integrate calendar → **Secret address in iCal format**. This needs
-  no Google sign-in or app registration. Outlook, iCloud and Fastmail share links work too. Links are stored in
-  `~/.config/jev-jelly/calendars` (mode 600), since anyone with a link can read that calendar. Fetching uses `curl`.
-- **Chat:** triple-click the jelly. A translucent, borderless line to type in fades in beside it with the keyboard
-  ready (IME input for Japanese, Chinese and Korean works, and so does Ctrl+V). Press Enter and the question goes
-  to your model in the background. The jelly bounces, thinks with little dots, and cheers when the reply comes
-  back, game-dialogue style: your question on top, the answer below. Enter to reply, Esc to close. The box stays open
-  after you send, so you can keep asking: waiting questions are listed above the input (the current one "thinking",
-  the rest "queued"), they're answered in order, and each answer comes back under its own question (Enter steps to
-  the next). Esc hides the box while it keeps answering; one click on the thinking jelly shows it again. It works with any OpenAI-compatible
-  endpoint and defaults to a local TensorFold / Qwen server on :8888. The default personality is kawaii, cheerful,
-  caring and curious, and it has safety guidance built in.
-  **Routing:** each message is handled by one of three routes, each with a prompt made for it: **Quick** (greetings
-  and easy questions: a deliberately short prompt, one to three sentences back), **Think** (the model reasons first
-  and answers conclusion-first) and **Research** (live information, answered from fresh results with sources). Clear
-  cues decide first ("price", "weather", 比特币, 天気 → Research; "prove", "code", 为什么 → Think). For the rest, a jev
-  model through the SystemOne API (a local Julia-1 on :8011) scores whether the web is needed; long messages go to
-  Think. The question sent to jev was picked on a labelled test set, and it's editable in settings. Research uses
-  **web search** (Brave, Exa or Tavily, with your API key); without it, the question goes to the **oh-my-pi**
-  agent (`omp`, which searches on its own). The agent is told to use the chat model: the provider in
-  `~/.omp/agent/models.yml` that serves the same endpoint (or a model you set). Only if neither works does the
-  model answer from memory, and it says so.
-  The **LLM** tab holds it all, in sub-tabs: **Model** (endpoint / model / key with Test, and sampling, in
-  collapsible groups), **Prompts** (one tab per route: prompt, reply length, thinking, *Improve* with Undo and
-  Default), **jev** (its API, score threshold, a "try a message" box, and its questions) and **Search** (web search
-  API and the agent). The **Chat** tab keeps chat's own options: saving history, viewing it, deleting it. Settings
-  are in `~/.config/jev-jelly/llm.conf` and history in `chat-history.jsonl`, both mode 600. API keys are passed to
-  curl on stdin, never on the command line.
-- **Right-click** opens the options panel on top of other windows (Dear ImGui via cimgui, styled like gpu-hud).
-  Drag it by its header to move it. The **check icon** beside × in the header (green when everything turned on works, yellow when something needs attention) runs **Test all**: it checks everything the settings depend on (chat model,
-  jev, web search, the oh-my-pi agent, curl, CJK fonts, calendars) and lists them with a light each: green works,
-  yellow needs attention, gray is off or not installed. It has an app theme (White / Dark / Tokyo Night), Boy / Girl, face style (Tiny eyes / Classic), 7 flavors or any color from the wheel, opacity,
-  stretch (Firm → Gooey), pull reach (a small pinch → more than half the body), and size. It also lists your
-  calendars: add as many links as you like (up to 10), each shown by its own name with an event count and an
-  on/off switch. **Events** opens a list of the next 3 months grouped by date and weekday. Click an event to read
-  its description. Changes apply live. "Take a nap" and "Quit jelly" are there too. Right-click
-  again or press × to close. Settings are saved in `~/.config/jev-jelly/jelly.conf`.
+### Chat
+
+- **Triple-click** the jelly. A translucent line to type in fades in beside it with the keyboard ready (IME typing
+  for Japanese, Chinese and Korean works, and so does Ctrl+V).
+- **Keep asking.** After you send, the box stays open: questions still waiting are listed above the input (the
+  current one "thinking…", the rest "queued") and are answered in order. The jelly bounces, thinks with little
+  dots, and cheers for each answer.
+- **Each answer shows under its question**, game-dialogue style, with how it was answered ("thought it through",
+  "searched the web", "asked the agent") and where it is in the conversation (`2 / 5`).
+- **Keys:** `r` reply · `n` next answer · `p` previous answer · `Enter` next if there is one, else reply ·
+  `Esc` hide (it keeps answering; one click on the jelly brings the box back).
+- **Move it** by dragging anywhere that isn't a control. It stays where you put it for the rest of the
+  conversation.
+- Works with any **OpenAI-compatible** endpoint (a local TensorFold / vLLM / Ollama server, or a hosted API). The
+  default personality is kawaii, cheerful, caring and curious, with safety guidance built in.
+- History is saved in `chat-history.jsonl` (mode 600) unless you switch that off; view or delete it in the Chat tab.
+
+### The decision chain: which route answers a message
+
+Every message goes to one of three **routes**, each with its own prompt, reply length and thinking setting:
+
+| Route | For | Prompt |
+|---|---|---|
+| **Quick** | greetings, small talk, simple stable facts | deliberately tiny: one to three sentences back |
+| **Think** | reasoning, math, code, planning, comparisons | work it out first; conclusion first, then numbered steps |
+| **Research** | prices, weather, news, scores, schedules, latest versions | answer from fresh results, with numbers, dates and sources |
+
+```mermaid
+flowchart TD
+  M([a message]) --> C{clear cue?}
+  C -- "price, weather, news, 比特币, 天気…" --> R[Research]
+  C -- "prove, code, explain, 为什么…" --> T[Think]
+  C -- no --> A{router model<br/>one word, ~0.5 s}
+  A -- search --> R
+  A -- think --> T
+  A -- quick --> Q[Quick]
+  A -- "can't answer" --> J{jev: needs the web?<br/>score ≥ 0.65}
+  J -- yes --> R
+  J -- no --> L{longer than 220 characters?}
+  L -- yes --> T
+  L -- no --> Q
+  R --> W{web search API set up?}
+  W -- yes --> WS[search + the chat model]
+  W -- no --> O{oh-my-pi installed?}
+  O -- yes --> AG[the agent searches on its own]
+  O -- no --> MEM[the model answers from memory and says so]
+```
+
+1. **Cues** decide instantly. Words that are common in small talk ("today", "now") are left out on purpose, so
+   "how are you today?" stays Quick.
+2. The **router model** is the chat model itself with thinking off, asked for a single word (`quick`, `think` or
+   `search`). Its prompt is editable (LLM → Prompts → Router).
+3. **jev** is the fallback when the router model can't answer: a jev model behind the SystemOne API (for example a
+   local Julia-1 on :8011), asked one yes/no question: "Would you need to look this up on the internet today to
+   answer correctly?". Its score must reach the threshold (default 0.65, adjustable).
+4. **Length**: anything longer than 220 characters goes to Think.
+
+How the router was chosen, measured on labelled messages (22 used while tuning plus 14 held out):
+
+| Router | Tuning set | Held out | Time |
+|---|---|---|---|
+| jev (Julia-1), multi-option "choice" | ignores the message: same answer every time | | 0.01 s |
+| jev (Julia-1), yes/no "needs the web" | 91% (separates search only) | 8 / 14 | 0.02 s |
+| cues + router model (Qwen3.8-Flash, thinking off) | 22 / 22 | 14 / 14 | ~0.5 s |
+
+### Models and services
+
+- **Chat model**: any OpenAI-compatible `/v1/chat/completions` endpoint. Pick the model from the server's
+  `/v1/models` list; each route sets its own reply length and whether the model thinks first.
+- **Router model**: the same endpoint and model, asked for one word.
+- **jev (SystemOne)**: the fallback router; its URL, threshold and question set are in LLM → jev.
+- **Web search**: Brave, Exa or Tavily with your API key. The top results go to the model with the question.
+- **oh-my-pi agent** (`omp`): answers Research questions when there's no search API, with its own web search. It
+  is told to use your chat model: the provider in `~/.omp/agent/models.yml` that serves the same endpoint (or a
+  model you set). Without that, omp would fall back to its own default model.
+- **Test all** (the check icon in the settings header) checks all of these, plus `curl`, the CJK font and your
+  calendars, with a light each.
+- API keys are passed to `curl` on stdin, never on the command line. Settings are in `llm.conf` (mode 600).
+
+### Calendar reminders
+
+- Add your calendar's secret iCal link (right-click → Calendar → *Paste link*). Up to 10 calendars, each with an
+  event count and an on/off switch; **Events** lists the next 3 months.
+- When you're at the desk (keyboard or mouse used in the last minute), an upcoming event appears beside the jelly
+  as solid words, each in its own slowly shifting color, and pixel-dissolves in and out. Click it to dismiss it;
+  otherwise it goes after 10 minutes. Each event shows at most three times: a heads-up (70 min to 48 h ahead),
+  one 15–70 minutes before, and one as it starts.
+- Recurring events (daily / weekly / monthly / yearly, BYDAY, COUNT, UNTIL), exceptions, cancellations, all-day
+  events and time zones (IANA and Outlook's Windows names) are handled. CJK titles use a matching font.
+- *Google Calendar:* Settings → your calendar → Integrate calendar → **Secret address in iCal format** (no sign-in
+  or app registration). Outlook, iCloud and Fastmail share links work too. The links are stored privately
+  (`calendars`, mode 600), since anyone with a link can read that calendar.
+
+### Settings
+
+**Right-click** the jelly. The panel comes up above other windows; drag it by its header. Tabs: **Jelly** (theme:
+White / Dark / Tokyo Night; character, face, flavor, opacity, stretch, pull reach, size), **Calendar**, **Chat**
+(history) and **LLM** (sub-tabs **Model**: endpoint, model, key and sampling, in collapsible groups; **Prompts**:
+Quick / Think / Research / Router; **jev**: its model and its questions; **Search**: the web search API and the
+agent). Changes apply live. "Take a nap" and "Quit jelly" are at the bottom.
 
 ## Download
 
-Prebuilt Linux binaries (x86_64 and aarch64) are on the
-[Releases page](https://github.com/jstdlee/jev-jelly/releases). Unpack one and run `./jelly &`, or run `scripts/install-desktop.sh` once for a **Jelly** icon on the desktop and in the app menu (only one jelly runs at a time; `--remove` takes it away). They're built on
-Ubuntu 24.04, so they need glibc 2.39 or newer and the usual `libX11`, `libXext` and `libGL`.
+Every push to `main` builds a release: **[Releases](https://github.com/jstdlee/jev-jelly/releases/latest)**.
 
-## Build & run
+- **Linux** (x86_64, aarch64): unpack, run `./jelly &`. `scripts/install-desktop.sh` adds a **Jelly** icon to the
+  desktop and the app menu (only one jelly runs at a time; `--remove` takes it away). Built on Ubuntu 24.04:
+  glibc 2.39 or newer, plus the usual `libX11`, `libXext` and `libGL`. Needs X11 with a compositor (GNOME or KDE
+  on Xorg are fine). Wayland isn't supported: clients there can't place their own windows.
+- **Windows 10 / 11** (x86_64): unzip, run `jelly.exe`. `install-desktop.ps1` adds Desktop and Start-menu
+  shortcuts (`-Startup` also starts Jelly when you sign in). Needs OpenGL 3.3 (any GPU driver from the last
+  decade). `curl` ships with Windows 10 and later. The Windows version is new: it's built and smoke-tested in CI
+  on software rendering, so please report anything odd.
+
+Settings live in `~/.config/jev-jelly/` (Linux) or `%APPDATA%\jev-jelly\` (Windows).
+
+## Build
 
     git clone --recursive https://github.com/jstdlee/jev-jelly
     cd jev-jelly
     sudo apt install libx11-dev libxext-dev libgl-dev g++   # or, without root: scripts/fetch-headers.sh
     make && ./jelly &
+    make test                                              # the core unit tests
 
-The jelly runs under a small watchdog. If the NVIDIA driver can't give it a window at startup (this happens
+Windows: `make PLATFORM=windows` in MSYS2 (MINGW64, `mingw-w64-x86_64-gcc make`), or cross-built from Linux with
+mingw-w64 (`scripts/fetch-mingw.sh` unpacks one without root). `make PLATFORM=windows test` builds the tests.
+
+On Linux the jelly runs under a small watchdog: if the GPU driver can't give it a window at startup (this happens
 on a DGX Spark while a large model holds most of the memory), it restarts on Mesa software rendering
-(`LP_NUM_THREADS=1`, 30 fps, about 15% CPU). A later crash just restarts it. `JELLY_NO_WATCHDOG=1` runs it directly.
+(`LP_NUM_THREADS=1`, 30 fps). A later crash just restarts it. `JELLY_NO_WATCHDOG=1` runs it directly.
 
-It needs X11 with a compositor (GNOME or KDE on Xorg are fine) and OpenGL 3.3. Dear ImGui 1.92 comes in through
-the cimgui submodule. `JELLY_DEBUG=1 ./jelly` prints the physics state. Wayland is not supported, because clients
-there can't position their own windows.
+## How it's built
 
-## How it works
+```
+src/core/             the same on every system
+  jelly.c             the jelly: soft-body physics, rendering, moods, the main loop
+  options.c           the settings panel          chat.c      the chat box
+  bubble.c            the reminder words          ui.c        an ImGui surface (shared by the three)
+  llm.c               the model client, routing, web search, the agent, history
+  calendar.c          iCal fetching, parsing and recurrence expansion
+  theme.c             themes and the jelly buttons    shot.c   transparent screenshots
+  gl.h / gl.c         OpenGL 3.3 (loaded at runtime on Windows)
+src/platform/plat.h   what the core needs from the OS
+src/platform/linux/   X11 + GLX: ARGB windows, XShape click-through, the X input method, a crash watchdog
+src/platform/windows/ Win32 + WGL: layered windows fed from offscreen GL, WM_CHAR / IME, ICU time zones
+tests/                core unit tests: JSON, routing, iCal parsing and time zones, against the real platform layer
+```
 
-- `src/chat.c` + `src/llm.c` are the chat box and the model client, `src/kbd.c` is keyboard / IME input for the
-  ImGui windows.
-- `src/jelly.c` is the jelly, `src/calendar.c` fetches and expands the calendars, `src/bubble.c` draws the
-  LED reminder, and `src/options.c` is the right-click panel (a second ARGB window with its own GL
-  context and ImGui fed from X events). It uses an ARGB override-redirect window with GLX. The XShape input region is updated
-  30×/s from the body silhouette.
-- Feel model adapted from [cjxhaaa/slime](https://github.com/cjxhaaa/slime)'s `Blob`. The surface is a field of
-  radial offsets. Each offset springs back to rest (stiffness ~220, damping ~7.5) and is coupled to its mesh
-  neighbours (~380), so pokes, landings, wall hits and cursor brushes send a ripple across the body.
-  Squash is its own volume-preserving spring. A held jelly is locked to the hand with no lag. It stretches into a
-  droplet along a smoothed velocity trail and keeps that stretch when thrown. Throw velocity is fitted over the
-  last 80 ms, 60% of it is transferred, and the jelly glides to a stop.
-- Shader: Beer–Lambert-style depth tint, fresnel rim, fake-transmission env, analytic "room window" reflections
-  for the glossy highlights, premultiplied alpha. A depth pre-pass makes only the front surface blend.
-- Face, bow, hair, hearts and zzz are SDF quads pinned to surface anchor vertices, so they ride the deformation.
+- **Surfaces** are frameless, per-pixel transparent windows sharing one OpenGL 3.3 context. On Linux, a 32-bit
+  ARGB visual with an XShape input region (updated 30×/s from the body's silhouette). On Windows, layered windows:
+  GL draws offscreen, the pixels go to `UpdateLayeredWindow`, and transparent pixels click through.
+- **Feel model** adapted from [cjxhaaa/slime](https://github.com/cjxhaaa/slime)'s `Blob`: the surface is a field of
+  radial offsets, each springing back to rest and coupled to its mesh neighbours, so pokes, landings, wall hits and
+  cursor brushes ripple across the body. Squash is its own volume-preserving spring. A held jelly is locked to the
+  hand; it stretches into a droplet along a smoothed velocity trail and keeps that stretch when thrown.
+- **Shader**: Beer–Lambert-style depth tint, fresnel rim, fake transmission, analytic "room window" reflections for
+  the glossy highlights, premultiplied alpha, and a depth pre-pass so only the front surface blends. Face, bow,
+  hair, hearts and zzz are SDF quads pinned to surface anchor vertices, so they ride the deformation.
+- The UI is Dear ImGui 1.92 through the cimgui submodule.
+
+## CI and releases
+
+`.github/workflows/build.yml` runs on every push and pull request:
+
+- **Linux** (x86_64 and aarch64 runners) and **Windows** (MSYS2 / MinGW-w64): build, run the unit tests, then start
+  the real app for 10 seconds on software OpenGL (Xvfb + Mesa on Linux; Mesa's llvmpipe on Windows) and take a
+  screenshot.
+- **Release**: every push to `main` publishes version `v<VERSION>.<run number>` (and a `v*` tag publishes that
+  version) on the [Releases page](https://github.com/jstdlee/jev-jelly/releases), with the Linux tarballs, the
+  Windows zip, the smoke-test screenshots and the list of commits since the previous release.
+
+## Debugging
+
+| Variable | Does |
+|---|---|
+| `JELLY_DEBUG=1` | prints the physics state, routing decisions, keyboard focus |
+| `JELLY_OPEN_CHAT=1` / `JELLY_CHAT_SEND="a\|b\|c"` | open the chat box / and send questions (queued in order) |
+| `JELLY_CHAT_SELFTEST="a\|b"` | answer questions on stderr, without a window |
+| `JELLY_OPEN_EVENTS=1` | open the settings with the events list |
+| `JELLY_OPT_TABS="LLM,jev"` · `JELLY_OPT_SERVICES=1` | open those tabs · run Test all |
+| `JELLY_PREVIEW=1` | show a reminder |
+| `JELLY_SHOT_DIR=dir` `JELLY_SHOT_AT=5` | save each surface as a transparent PNG after 5 s |
+| `JELLY_SMOKE=10` `JELLY_SMOKE_OUT=file` | run 10 s, then quit and write the frame count |

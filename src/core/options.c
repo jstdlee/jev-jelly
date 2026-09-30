@@ -1,20 +1,13 @@
-// Right-click options panel: a borderless ARGB window next to the jelly, drawn with cimgui + the OpenGL3 backend.
-// Mouse input comes straight from X events; there's no keyboard because every control works by mouse.
-// Drag either panel by its header to move it. The events pane opens beside the settings.
+// Right-click options panel: a borderless transparent surface next to the jelly, drawn with cimgui + the OpenGL3
+// backend. Drag either panel by its header to move it. The events / history / services pane opens beside the
+// settings.
 
-#define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
-#include "cimgui.h"
-#define CIMGUI_USE_OPENGL3
-#include "cimgui_impl.h"
+#include "ui.h"
 #include "jelly.h"
-#include <X11/Xutil.h>
-#include <X11/extensions/shape.h>
-#include <GL/gl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define W 340        // settings panel width
 #define EW 470       // events pane width
@@ -24,17 +17,11 @@
 #define EH 720       // events pane height
 #define HEADER 40    // drag handle height
 
-static Display *dpy;
-static GLXFBConfig fbc;
-static Window win;
-static GLXContext ctx;
-static ImGuiContext *ig;
+static Ui ui;
+static int created;
 static int open_, panelH = 800, wantClose, wantPreview, showWheel, showEvents, showHistory, showServices, shapeDirty = 1;
-static Kbd okb;
-static const Theme *styled; // the theme the ImGui style was built for          // keyboard for the text fields (endpoint, key, prompt)
+static const Theme *styled; // the theme the ImGui style was built for
 static double deleteArmed; // "Delete history" needs a second click
-static int winX, winY;                                // where the canvas is on screen
-static int dragging, dragRX, dragRY, dragWX, dragWY;  // moving the panel by its header
 static double evAt = -1; // when the events list was last copied
 #define SIDE (showEvents || showHistory || showServices) // the pane beside the settings is open
 static void side_off(void) { showEvents = showHistory = showServices = 0; shapeDirty = 1; }
@@ -51,22 +38,15 @@ static const char *PULL_NAMES[] = {"Pinch", "Small", "Half body", "Big", "Most"}
 static const unsigned CAL_COLORS[CAL_MAX_URLS] = {0x2f81f7, 0x3fb950, 0xd29922, 0xf778ba, 0xa371f7,
                                                   0xdb6d28, 0x39c5cf, 0xf85149, 0x8b949e, 0x56d364};
 
-/* the clipboard arrives asynchronously as a SelectionNotify on our window */
-static void request_clipboard(void) {
-  XConvertSelection(dpy, XInternAtom(dpy, "CLIPBOARD", False), XInternAtom(dpy, "UTF8_STRING", False),
-                    XInternAtom(dpy, "JELLY_CLIP", False), win, CurrentTime);
-  XFlush(dpy);
-}
-static void got_clipboard(XSelectionEvent *se) {
+/* "Paste link": the clipboard arrives as a PE_PASTE event with tag 1 (tag 0 is typing into a text field) */
+enum { PASTE_CALENDAR = 1 };
+static void request_clipboard(void) { pw_request_paste(ui.win, PASTE_CALENDAR); }
+static void got_clipboard(const char *data) {
   snprintf(calNote, sizeof calNote, "The clipboard has no calendar link");
-  if (se->property != None) {
-    Atom type; int fmt; unsigned long n, left; unsigned char *data = NULL;
-    if (XGetWindowProperty(dpy, win, se->property, 0, 4096, True, AnyPropertyType, &type, &fmt, &n, &left, &data) == Success && data) {
-      if (cal_add_url((const char *)data)) snprintf(calNote, sizeof calNote, "Added — reading it now…");
-      else if (!strncmp((const char *)data, "http", 4) || !strncmp((const char *)data, "webcal", 6))
-        snprintf(calNote, sizeof calNote, "Already added (or %d calendars max)", CAL_MAX_URLS);
-      XFree(data);
-    }
+  if (data) {
+    if (cal_add_url(data)) snprintf(calNote, sizeof calNote, "Added — reading it now…");
+    else if (!strncmp(data, "http", 4) || !strncmp(data, "webcal", 6))
+      snprintf(calNote, sizeof calNote, "Already added (or %d calendars max)", CAL_MAX_URLS);
   }
   calNoteAt = 0;
 }
@@ -110,75 +90,31 @@ static int segmented(const char *id, const char **items, int n, int *val, float 
   return changed;
 }
 
-void opt_init(Display *d, GLXFBConfig fb, GLXContext shared) { dpy = d; fbc = fb; ctx = shared; }
 int opt_is_open(void) { return open_; }
-int opt_owns(Window w) { return open_ && w == win; }
 
-static void create(int x, int y) {
-  XVisualInfo *vi = glXGetVisualFromFBConfig(dpy, fbc);
-  Window root = DefaultRootWindow(dpy);
-  XSetWindowAttributes swa = {0};
-  swa.colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
-  swa.override_redirect = False; // managed (see kb_prepare_window) so it can take the keyboard
-  swa.event_mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask | LeaveWindowMask | ExposureMask |
-                   KeyPressMask | KeyReleaseMask | FocusChangeMask;
-  win = XCreateWindow(dpy, root, x, y, CW, H, 0, vi->depth, InputOutput, vi->visual,
-                      CWColormap | CWBorderPixel | CWBackPixel | CWOverrideRedirect | CWEventMask, &swa);
-  kb_prepare_window(win);
-  XStoreName(dpy, win, "jelly options");
-  XFree(vi);
-  kb_attach(&okb, win);
-
-  // drawn with the jelly's own GL context (same visual): no new context is ever created
-  XMapRaised(dpy, win);
-
-  // GL objects belong to the (shared) context, so they're created while the jelly's window stays current
-  GLXContext prevCtx = glXGetCurrentContext();
-  GLXDrawable prevDraw = glXGetCurrentDrawable();
-
-  ig = igCreateContext(NULL);
-  igSetCurrentContext(ig);
-  ImGuiIO *io = igGetIO_Nil();
-  io->IniFilename = NULL;
-  const char *fonts[] = {"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-                         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
-  for (int i = 0; i < 2; i++)
-    if (access(fonts[i], R_OK) == 0) { ImFontAtlas_AddFontFromFileTTF(io->Fonts, fonts[i], 17.0f, NULL, NULL); break; }
-  // Japanese / Chinese / Korean event titles: merge Noto Sans CJK in (glyphs load on demand)
-  const char *cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
-  if (access(cjk, R_OK) == 0) {
-    ImFontConfig *fc = ImFontConfig_ImFontConfig();
-    fc->MergeMode = true;
-    ImFontAtlas_AddFontFromFileTTF(io->Fonts, cjk, 17.0f, fc, NULL);
-    ImFontConfig_destroy(fc);
-  }
+static void create(void) {
+  ui_init(&ui, "jelly options", CW, H, PW_KEYBOARD, 17.0f);
   theme_style(igGetStyle(), 0); styled = theme();
-  ImGui_ImplOpenGL3_Init("#version 330 core");
-  glXMakeCurrent(dpy, prevDraw, prevCtx);
+  created = 1;
 }
 
 static void clamp_to_screen(void) {
-  int sw = DisplayWidth(dpy, DefaultScreen(dpy)), sh = DisplayHeight(dpy, DefaultScreen(dpy));
+  int sw, sh; plat_screen(&sw, &sh);
   int wide = SIDE ? CW : W;
-  if (winX + wide > sw) winX = sw - wide - 8;
-  if (winY + panelH > sh) winY = sh - panelH - 8;
-  if (winX < 8) winX = 8;
-  if (winY < 8) winY = 8;
+  if (ui.x + wide > sw) ui.x = sw - wide - 8;
+  if (ui.y + panelH > sh) ui.y = sh - panelH - 8;
+  if (ui.x < 8) ui.x = 8;
+  if (ui.y < 8) ui.y = 8;
 }
 
 void opt_open(int x, int y) {
-  winX = x; winY = y;
+  if (!created) create();
+  ui.x = x; ui.y = y;
   clamp_to_screen();
-  if (!win) create(winX, winY);
-  else { // the window manager forgets "always on top" when a window is hidden: set it again, then raise
-    kb_prepare_window(win);
-    XMoveWindow(dpy, win, winX, winY);
-    XMapRaised(dpy, win);
-    XSync(dpy, False);
-    XMoveWindow(dpy, win, winX, winY);
-  }
-  XRaiseWindow(dpy, win);
-  kb_grab_soon(&okb, 0); // activate it, so it comes up above whatever window has the focus
+  ui_move(&ui, ui.x, ui.y);
+  pw_show(ui.win); // above everything (the window manager forgets that when a window is hidden: set every time)
+  pw_raise(ui.win);
+  pw_focus_soon(ui.win, ui.clock); // activate it, so it comes up above whatever window has the focus
   open_ = 1; wantClose = 0; shapeDirty = 1;
 }
 
@@ -186,9 +122,8 @@ void opt_show_events(int on) { side_off(); showEvents = on; evAt = -1; }
 
 void opt_close(void) {
   if (!open_) return;
-  kb_release(&okb);
-  XUnmapWindow(dpy, win);
-  open_ = 0; dragging = 0;
+  pw_hide(ui.win);
+  open_ = 0; ui.dragging = 0;
   llm_cfg_save();
 }
 
@@ -199,40 +134,12 @@ static int on_header(int x, int y) {
   return SIDE && x > W + GAP && x < CW - 48;
 }
 
-void opt_event(XEvent *e) {
-  if (!open_) return;
-  igSetCurrentContext(ig);
-  ImGuiIO *io = igGetIO_Nil();
-  if (kb_paste_arrived(&okb, e, io, 0)) return;
-  if (kb_event(&okb, e, io)) { if (okb.wantPaste) kb_request_paste(&okb); return; }
-  switch (e->type) {
-  case MotionNotify:
-    if (dragging) {
-      winX = dragWX + e->xmotion.x_root - dragRX; winY = dragWY + e->xmotion.y_root - dragRY;
-      XMoveWindow(dpy, win, winX, winY);
-      return;
-    }
-    ImGuiIO_AddMousePosEvent(io, (float)e->xmotion.x, (float)e->xmotion.y);
-    break;
-  case LeaveNotify: if (!dragging) ImGuiIO_AddMousePosEvent(io, -3.4e38f, -3.4e38f); break;
-  case SelectionNotify: got_clipboard(&e->xselection); break;
-  case ButtonPress:
-  case ButtonRelease: {
-    int down = e->type == ButtonPress, b = e->xbutton.button;
-    if (b == Button1 && down && on_header(e->xbutton.x, e->xbutton.y)) {
-      dragging = 1; dragRX = e->xbutton.x_root; dragRY = e->xbutton.y_root; dragWX = winX; dragWY = winY;
-      return;
-    }
-    if (b == Button1 && !down && dragging) { dragging = 0; return; }
-    ImGuiIO_AddMousePosEvent(io, (float)e->xbutton.x, (float)e->xbutton.y);
-    if (b == Button1) ImGuiIO_AddMouseButtonEvent(io, 0, down);
-    else if (b == Button3) ImGuiIO_AddMouseButtonEvent(io, 1, down);
-    else if (b == Button2) ImGuiIO_AddMouseButtonEvent(io, 2, down);
-    else if (down && b == Button4) ImGuiIO_AddMouseWheelEvent(io, 0, 1);
-    else if (down && b == Button5) ImGuiIO_AddMouseWheelEvent(io, 0, -1);
-    break;
-  }
-  }
+int opt_event(const PEvent *e) {
+  if (!open_ || e->win != ui.win) return 0;
+  if (e->type == PE_PASTE && e->tag == PASTE_CALENDAR) { got_clipboard(e->paste); return 1; }
+  if (ui_drag(&ui, e)) return 1;
+  if (e->type == PE_BUTTON && e->button == PB_LEFT && e->down && on_header((int)e->x, (int)e->y)) { ui_drag_start(&ui, e); return 1; }
+  return ui_event(&ui, e);
 }
 
 /* debugging aid: JELLY_OPT_TABS="LLM,jev" opens those tabs for the first frames (screenshots without input) */
@@ -346,8 +253,8 @@ static void events_pane(double now) {
     ImDrawList_AddText_FontPtr(dl, font, fs, (ImVec2_c){p.x + tx, p.y + 4}, C_TEXT(1), e->title, NULL, tw, NULL);
     if (*e->where)
       ImDrawList_AddText_FontPtr(dl, font, fs * 0.85f, (ImVec2_c){p.x + tx, p.y + 4 + ts.y + 1}, C_MUTED(1), e->where, NULL, tw, NULL);
-    char mon[16]; strftime(mon, sizeof mon, "%b %e", &s); // month label, e.g. "Oct  2"
-    { char *d = mon, *o = mon; for (; *d; d++) if (!(*d == ' ' && d[1] == ' ')) *o++ = *d; *o = 0; }
+    char mon[16], mname[8]; strftime(mname, sizeof mname, "%b", &s); // month label, e.g. "Oct 2" (%e isn't portable)
+    snprintf(mon, sizeof mon, "%s %d", mname, s.tm_mday);
     ImVec2_c ms = ImFont_CalcTextSizeA(font, fs * 0.85f, 1e9f, 0, mon, NULL, NULL);
     if (!same) ImDrawList_AddText_FontPtr(dl, font, fs * 0.85f, (ImVec2_c){p.x + full - 34 - ms.x, p.y + 6}, C_MUTED(1), mon, NULL, 0, NULL);
     if (*e->desc) ImDrawList_AddText_FontPtr(dl, font, fs, (ImVec2_c){p.x + full - 24, p.y + 4}, C_MUTED(1), open ? "−" : "+", NULL, 0, NULL);
@@ -528,8 +435,10 @@ static void services_pane(double now) {
   label("TOOLS");
   int curl = llm_curl_available();
   service_row("curl", "all network requests", curl ? SV_GREEN : SV_GRAY, 0, curl ? "Installed" : "Not installed: chat, routing and calendars can't connect", now);
-  int cjk = access("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", R_OK) == 0;
-  service_row("Noto Sans CJK", "Chinese / Japanese / Korean text", cjk ? SV_GREEN : SV_GRAY, 0, cjk ? "Installed" : "Not installed: CJK text shows as boxes (fonts-noto-cjk)", now);
+  char fp[512]; int cjk = plat_font(1, fp, sizeof fp);
+  const char *fn = strrchr(fp, '/') ? strrchr(fp, '/') + 1 : strrchr(fp, '\\') ? strrchr(fp, '\\') + 1 : fp;
+  service_row("CJK font", "Chinese / Japanese / Korean text", cjk ? SV_GREEN : SV_GRAY, 0,
+              cjk ? fn : "Not installed: CJK text shows as boxes (fonts-noto-cjk)", now);
 
   label("CALENDAR");
   int nc = cal_count(), bad = 0, off = 0, pend = 0, events = 0;
@@ -550,23 +459,9 @@ static void services_pane(double now) {
 int opt_frame(Cfg *c, double dt) {
   if (!open_) return OPT_NONE;
   int out = 0;
-  GLXContext prevCtx = glXGetCurrentContext();
-  GLXDrawable prevDraw = glXGetCurrentDrawable();
-  glXMakeCurrent(dpy, win, ctx);
-  static int swapSet; // no vsync wait here: the jelly's own swap paces the loop
-  if (!swapSet) {
-    typedef void (*SwapFn)(Display *, GLXDrawable, int);
-    SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-    if (si) si(dpy, win, 0);
-    swapSet = 1;
-  }
-  igSetCurrentContext(ig);
+  ui_frame_begin(&ui, dt);
   if (styled != theme()) { theme_style(igGetStyle(), 0); styled = theme(); }
   ImGuiIO *io = igGetIO_Nil();
-  io->DisplaySize = (ImVec2_c){(float)CW, (float)H};
-  io->DeltaTime = dt > 0 ? (float)dt : 1.0f / 60;
-  ImGui_ImplOpenGL3_NewFrame();
-  igNewFrame();
 
   igSetNextWindowPos((ImVec2_c){0, 0}, ImGuiCond_Always, (ImVec2_c){0, 0});
   igSetNextWindowSize((ImVec2_c){(float)W, 0}, ImGuiCond_Always);
@@ -986,20 +881,8 @@ int opt_frame(Cfg *c, double dt) {
   if (showHistory) history_pane(clock_);
   if (showServices) services_pane(clock_);
 
-  igRender();
-  glViewport(0, 0, CW, H);
-  glClearColor(0, 0, 0, 0);
-  glClear(GL_COLOR_BUFFER_BIT);
-  ImGui_ImplOpenGL3_RenderDrawData(igGetDrawData());
-  glXSwapBuffers(dpy, win);
-  glXMakeCurrent(dpy, prevDraw, prevCtx);
-  { // take the keyboard when a text field is activated (the panel is managed, so ask the window manager)
-    static double oclk; oclk += dt;
-    if (io->WantTextInput && !okb.prevWant && !okb.focused) kb_grab_soon(&okb, oclk - 0.2);
-    if (!io->WantTextInput) okb.grabTries = 0;
-    okb.prevWant = io->WantTextInput;
-    kb_tick(&okb, oclk);
-  }
+  ui_frame_end(&ui);
+  pw_want_text(ui.win, io->WantTextInput); // take the keyboard when a text field is activated
 
   // only the panels take clicks; the rest of the canvas is transparent and click-through
   int nh = (int)ceilf(ws.y);
@@ -1007,18 +890,17 @@ int opt_frame(Cfg *c, double dt) {
   int popup = igIsPopupOpen_Str("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
   if (popup != popupWas) { popupWas = popup; shapeDirty = 1; }
   if (popup && shapeDirty) {
-    XRectangle all = {0, 0, CW, H};
-    XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, &all, 1, ShapeSet, Unsorted);
+    pw_input_rects(ui.win, NULL, 0);
     shapeDirty = 0;
   }
   if ((nh > 50 && nh != panelH) || shapeDirty) {
     if (nh > 50) panelH = nh;
-    XRectangle r[2] = {{0, 0, (unsigned short)W, (unsigned short)panelH}, {W + GAP, 0, EW, EH}};
-    XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, r, SIDE ? 2 : 1, ShapeSet, Unsorted);
+    PRect r[2] = {{0, 0, W, panelH}, {W + GAP, 0, EW, EH}};
+    pw_input_rects(ui.win, r, SIDE ? 2 : 1);
     if (shapeDirty && SIDE) { // opening the events pane: keep it on screen
-      int ox = winX, oy = winY;
+      int ox = ui.x, oy = ui.y;
       clamp_to_screen();
-      if (ox != winX || oy != winY) XMoveWindow(dpy, win, winX, winY);
+      if (ox != ui.x || oy != ui.y) ui_move(&ui, ui.x, ui.y);
     }
     shapeDirty = 0;
   }

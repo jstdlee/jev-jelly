@@ -1,5 +1,8 @@
 name: build
 
+# Every push and pull request: build Linux (x86_64, aarch64) and Windows (x86_64), run the core unit tests on each,
+# and start the real app for a few seconds on software OpenGL (a smoke test, with a screenshot).
+# Every push to main (and every v* tag) then publishes a GitHub release with the packages and the screenshots.
 on:
   push:
     branches: [main]
@@ -11,7 +14,21 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(cat VERSION).${{ github.run_number }}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version: $v"
+
+  linux:
+    needs: version
     strategy:
       matrix:
         include:
@@ -20,39 +37,147 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install X11 / GL headers
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl-dev
+      - name: Install X11 / GL headers, Xvfb and Mesa
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libgl-dev xvfb xauth libgl1-mesa-dri imagemagick fonts-noto-core fonts-noto-cjk
       - name: Build
-        run: make -j"$(nproc)"
+        run: make -j"$(nproc)" VERSION="$VERSION"
+      - name: Unit tests
+        run: make test VERSION="$VERSION"
+      - name: Smoke test (Xvfb + software GL)
+        run: |
+          ./jelly --version
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
+          xvfb-run -a -s "-screen 0 1440x900x24" bash -c '
+            LIBGL_ALWAYS_SOFTWARE=1 JELLY_NO_WATCHDOG=1 JELLY_SMOKE=10 JELLY_SMOKE_OUT=smoke.txt \
+              JELLY_OPEN_EVENTS=1 JELLY_OPT_SERVICES=1 JELLY_OPT_TABS=Jelly ./jelly & pid=$!
+            sleep 7; import -window root screenshot-linux-${{ matrix.arch }}.png; wait $pid'
+          cat smoke.txt
+          grep -q "frames=" smoke.txt
       - name: Package
         run: |
-          ver="${GITHUB_REF_NAME//\//-}"
-          name="jev-jelly-${ver}-linux-${{ matrix.arch }}"
-          mkdir -p "dist/$name"
+          name="jev-jelly-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name/scripts" "dist/$name/assets"
           cp jelly README.md "dist/$name/"
+          cp scripts/install-desktop.sh scripts/run-jelly.sh "dist/$name/scripts/"
+          cp assets/jev-jelly.svg "dist/$name/assets/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          echo "PKG=dist/$name.tar.gz" >> "$GITHUB_ENV"
+          mv screenshot-linux-*.png dist/
       - uses: actions/upload-artifact@v4
         with:
           name: jev-jelly-linux-${{ matrix.arch }}
-          path: ${{ env.PKG }}
+          path: |
+            dist/*.tar.gz
+            dist/*.png
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+      - name: Build
+        shell: msys2 {0}
+        run: make PLATFORM=windows -j4 VERSION="$VERSION"
+      - name: Unit tests
+        shell: msys2 {0}
+        run: make PLATFORM=windows test VERSION="$VERSION"
+      - name: Smoke test (Mesa software OpenGL)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # the runner has no GPU: Mesa's llvmpipe gives OpenGL 4.5 in software
+          gh release download --repo pal1000/mesa-dist-win --pattern '*release-msvc.7z' --dir mesa
+          7z x (Get-ChildItem mesa\*.7z).FullName -omesa\x | Out-Null
+          New-Item -ItemType Directory smoke | Out-Null
+          Copy-Item jelly.exe smoke\
+          Copy-Item mesa\x\x64\*.dll smoke\
+          $env:JELLY_SMOKE = '10'; $env:JELLY_SMOKE_OUT = "$PWD\smoke.txt"
+          $env:JELLY_OPEN_EVENTS = '1'; $env:JELLY_OPT_SERVICES = '1'; $env:JELLY_OPT_TABS = 'Jelly'
+          $p = Start-Process -FilePath smoke\jelly.exe -PassThru
+          Start-Sleep -Seconds 7
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size, [System.Drawing.CopyPixelOperation]::SourceCopy -bor [System.Drawing.CopyPixelOperation]::CaptureBlt)
+          $bmp.Save("$PWD\screenshot-windows.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $p | Wait-Process -Timeout 60
+          Get-Content smoke.txt
+          if (-not (Select-String -Path smoke.txt -Pattern 'frames=')) { exit 1 }
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "jev-jelly-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory "dist\$name" | Out-Null
+          Copy-Item jelly.exe, README.md, scripts\install-desktop.ps1 "dist\$name\"
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
+          Move-Item screenshot-windows.png dist\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jev-jelly-windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.png
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, linux, windows]
     runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Release notes
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" \
-            --title "jev-jelly $GITHUB_REF_NAME" --generate-notes
+          tag="v$VERSION"
+          prev=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$tag" | head -1)
+          {
+            echo "## jev-jelly $tag"
+            echo
+            echo "A squishy jelly friend for your desktop. Download the package for your system below."
+            echo
+            echo "| System | Download |"
+            echo "|---|---|"
+            for f in dist/*.tar.gz dist/*.zip; do
+              n=$(basename "$f")
+              echo "| ${n#jev-jelly-$VERSION-} | [$n](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$n) |"
+            done
+            echo
+            echo "Linux: unpack, then \`./jelly &\` (or \`scripts/install-desktop.sh\` for a desktop icon)."
+            echo "Windows: unzip, run \`jelly.exe\` (or \`install-desktop.ps1\` for Desktop and Start-menu shortcuts)."
+            echo
+            echo "### Changes"
+            if [ -n "$prev" ]; then git log --no-merges --format='- %s (%h)' "$prev..$GITHUB_SHA"
+            else git log --no-merges --format='- %s (%h)' -20 "$GITHUB_SHA"; fi
+            echo
+            echo "Screenshots from this build's smoke tests (software rendering) are attached."
+          } > notes.md
+          cat notes.md
+      - name: Publish release
+        run: |
+          tag="v$VERSION"
+          gh release create "$tag" dist/*.tar.gz dist/*.zip dist/*.png --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "jev-jelly $tag" --notes-file notes.md --latest

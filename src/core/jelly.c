@@ -1,36 +1,24 @@
-// jelly — a little jelly friend that wanders your X11 desktop.
-// Frameless ARGB override-redirect window + OpenGL 3.3, click-through outside the body.
-// Left-drag to pull/throw, click to poke, hover-wiggle to pet, right-click for settings.
+// jelly — a little jelly friend that wanders your desktop.
+// A frameless transparent surface + OpenGL 3.3, click-through outside the body (see platform/plat.h).
+// Left-drag to pull/throw, click to poke, hover-wiggle to pet, triple-click to chat, right-click for settings.
 
 #define _GNU_SOURCE
-#define GL_GLEXT_PROTOTYPES
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-#include <X11/cursorfont.h>
-#include <X11/extensions/shape.h>
-#include <GL/gl.h>
-#include <GL/glext.h>
-#include <GL/glx.h>
+#include "gl.h"
 #include <math.h>
 #include <signal.h>
-#include <spawn.h>
-#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#include <locale.h>
 
 #include "jelly.h"
+#include "shot.h"
 
 #define PI 3.14159265f
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
 static float frand(float a, float b) { return a + (b - a) * (rand() / (float)RAND_MAX); }
-static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static double now(void) { return plat_now(); }
 
 /* ------------------------------------------------------------------ settings */
 
@@ -41,10 +29,7 @@ const float FLAVOR_COLS[NFLAVORS][3] = {
 
 static Cfg cfg = {1, 0, {0.25f, 0.62f, 0.96f}, 0.5f, 60.0f, FACE_TINY, 0.6f, 1.0f, THEME_DARK};
 
-static void cfg_path(char *out, size_t n) {
-  const char *h = getenv("HOME");
-  snprintf(out, n, "%s/.config/jev-jelly/jelly.conf", h ? h : ".");
-}
+static void cfg_path(char *out, size_t n) { plat_config_path("jelly.conf", out, n); }
 static void cfg_load(void) {
   char p[512]; cfg_path(p, sizeof p);
   FILE *f = fopen(p, "r"); if (!f) return;
@@ -74,9 +59,6 @@ static void cfg_load(void) {
 }
 static void cfg_save(void) {
   char p[512]; cfg_path(p, sizeof p);
-  char d[512]; snprintf(d, sizeof d, "%s", p); *strrchr(d, '/') = 0;
-  char parent[512]; snprintf(parent, sizeof parent, "%s", d); *strrchr(parent, '/') = 0;
-  mkdir(parent, 0755); mkdir(d, 0755);
   FILE *f = fopen(p, "w"); if (!f) return;
   fprintf(f, "girl=%d\nflavor=%d\nflex=%.3f\nsize=%.0f\nface=%d\npull=%.3f\nopacity=%.2f\ntheme=%d\ncolor=%.3f %.3f %.3f\n", cfg.girl, cfg.flavor,
           cfg.flex, cfg.size, cfg.face, cfg.pull, cfg.opacity, cfg.theme, cfg.col[0], cfg.col[1], cfg.col[2]);
@@ -179,10 +161,7 @@ static void build_anchors(void) {
 
 /* ------------------------------------------------------------------ state */
 
-static Display *dpy;
-static Window win;
-static GLXContext ctx;
-static GLXFBConfig fb;
+static PWin *win;
 static int SW, SH, W, H, winX = -99999, winY = -99999;
 static float R, footY;
 static const float TILT = 0.30f;
@@ -963,8 +942,8 @@ static void render(void) {
 /* ------------------------------------------------------------------ window */
 
 static void update_input_shape(void) {
-  XRectangle rs[40]; int n = 0;
-  if (pressed) { rs[0] = (XRectangle){0, 0, (unsigned short)W, (unsigned short)H}; n = 1; }
+  PRect rs[40]; int n = 0;
+  if (pressed) n = 0; // the whole window while held
   else {
     enum { NB = 28 };
     float y0 = 1e9f, y1 = -1e9f;
@@ -980,10 +959,10 @@ static void update_input_shape(void) {
     for (int b = 0; b < NB; b++) {
       if (lo[b] > hi[b]) { lo[b] = W * 0.5f - 0.25f * R; hi[b] = W * 0.5f + 0.25f * R; }
       int x = (int)lo[b] - 2, w = (int)(hi[b] - lo[b]) + 4;
-      rs[n++] = (XRectangle){(short)x, (short)(y0 + b * bh - 1), (unsigned short)(w > 0 ? w : 1), (unsigned short)(bh + 2)};
+      rs[n++] = (PRect){x, (int)(y0 + b * bh - 1), w > 0 ? w : 1, (int)(bh + 2)};
     }
   }
-  XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, rs, n, ShapeSet, Unsorted);
+  pw_input_rects(win, rs, n);
 }
 
 static void apply_size(int first) {
@@ -991,99 +970,27 @@ static void apply_size(int first) {
   W = (int)(R * 8.0f); H = (int)(R * 8.0f);
   footY = H * 0.62f;
   compute_bounds();
-  if (!first) { XResizeWindow(dpy, win, W, H); winX = winY = -99999; }
+  if (!first) { pw_resize(win, W, H); winX = winY = -99999; }
   Fx = clampf(Fx, bx0, bx1); Fy = clampf(Fy, by0, by1);
 }
 
 static void create_window(void) {
-  int scr_n = DefaultScreen(dpy);
-  Window root = RootWindow(dpy, scr_n);
-  SW = DisplayWidth(dpy, scr_n); SH = DisplayHeight(dpy, scr_n);
-  int attr[] = {GLX_X_RENDERABLE, True, GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT, GLX_RENDER_TYPE, GLX_RGBA_BIT,
-                GLX_X_VISUAL_TYPE, GLX_TRUE_COLOR, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8,
-                GLX_ALPHA_SIZE, 8, GLX_DEPTH_SIZE, 24, GLX_DOUBLEBUFFER, True, GLX_SAMPLE_BUFFERS, 1,
-                GLX_SAMPLES, 4, None};
-  XVisualInfo *vi = NULL;
-  for (int pass = softGL; pass < 2 && !vi; pass++) { // (software GL: skip multisampling, it's costly on the CPU)
-    if (pass == 1) { attr[20] = GLX_SAMPLE_BUFFERS; attr[21] = 0; attr[22] = GLX_SAMPLES; attr[23] = 0; }
-    int n = 0; GLXFBConfig *fbs = glXChooseFBConfig(dpy, scr_n, attr, &n);
-    for (int i = 0; i < n; i++) {
-      XVisualInfo *v = glXGetVisualFromFBConfig(dpy, fbs[i]);
-      if (v && v->depth == 32) { fb = fbs[i]; vi = v; break; }
-      if (v) XFree(v);
-    }
-    if (fbs) XFree(fbs);
-  }
-  if (!vi) { fprintf(stderr, "no 32-bit ARGB GLX visual (is a compositor running?)\n"); exit(1); }
-
-  XSetWindowAttributes swa = {0};
-  swa.colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
-  swa.border_pixel = 0; swa.background_pixel = 0; swa.override_redirect = True;
-  swa.event_mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask | ExposureMask;
-  win = XCreateWindow(dpy, root, (int)Fx - W / 2, (int)(Fy - footY), W, H, 0, vi->depth, InputOutput, vi->visual,
-                      CWColormap | CWBorderPixel | CWBackPixel | CWOverrideRedirect | CWEventMask, &swa);
-  XStoreName(dpy, win, "jelly");
-  XClassHint ch = {"jelly", "Jelly"}; XSetClassHint(dpy, win, &ch);
-  XDefineCursor(dpy, win, XCreateFontCursor(dpy, XC_hand2));
-
-  typedef GLXContext (*CtxFn)(Display *, GLXFBConfig, GLXContext, Bool, const int *);
-  CtxFn mk = (CtxFn)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
-  int cattr[] = {GLX_CONTEXT_MAJOR_VERSION_ARB, 3, GLX_CONTEXT_MINOR_VERSION_ARB, 3, GLX_CONTEXT_PROFILE_MASK_ARB,
-                 GLX_CONTEXT_CORE_PROFILE_BIT_ARB, None};
-  if (mk) ctx = mk(dpy, fb, NULL, True, cattr);
-  if (!ctx) ctx = glXCreateNewContext(dpy, fb, GLX_RGBA_TYPE, NULL, True);
-  XFree(vi);
-  XMapRaised(dpy, win);
-  opt_init(dpy, fb, ctx);
-  bub_init(dpy, fb, ctx);
-  glXMakeCurrent(dpy, win, ctx);
-  typedef void (*SwapFn)(Display *, GLXDrawable, int);
-  SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-  if (si) si(dpy, win, 1);
+  win = pw_create("jelly", (int)Fx - W / 2, (int)(Fy - footY), W, H, PW_HAND | PW_MSAA);
+  pw_show(win);
+  pw_begin(win); // the context stays current on the jelly: every GL object is created here
+  if (!gl_load()) { fprintf(stderr, "OpenGL 3.3 is needed\n"); exit(1); }
+  pw_vsync(win, 1);
 }
 
 static void on_sig(int s) { (void)s; running = 0; }
-static int on_xerror(Display *d, XErrorEvent *e) {
-  if (getenv("JELLY_DEBUG")) { char msg[128]; XGetErrorText(d, e->error_code, msg, sizeof msg); fprintf(stderr, "X error (ignored): %s\n", msg); }
-  return 0;
-}
-
-/* Watchdog: the jelly runs as a child process. On this GB10, NVIDIA GL crashes new windows in their first frames
-   while a big model holds most of the memory (e.g. TensorFold's ~90 GB): then it restarts on Mesa software GL.
-   A later crash just restarts it (at most a few times a minute). */
-extern char **environ;
-static int watchdog(char *self) {
-  int software = getenv("LIBGL_ALWAYS_SOFTWARE") != NULL, restarts = 0;
-  double windowStart = now();
-  for (;;) {
-    char *argv[] = {self, NULL};
-    if (software) { // one render thread: llvmpipe's worker threads spin and cost 4x the CPU for a window this small
-      setenv("__GLX_VENDOR_LIBRARY_NAME", "mesa", 1); setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
-      setenv("LP_NUM_THREADS", "1", 0);
-    }
-    setenv("JELLY_CHILD", "1", 1);
-    pid_t pid;
-    if (posix_spawn(&pid, "/proc/self/exe", NULL, NULL, argv, environ) != 0) return 1;
-    double t0 = now();
-    int st = 0;
-    while (waitpid(pid, &st, 0) < 0) {}
-    if (WIFEXITED(st)) return WEXITSTATUS(st); // quit on purpose
-    int early = now() - t0 < 20 && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; // the driver's crash, not a bug of ours
-    if (early && !software) { // the GPU driver can't give us a window right now
-      fprintf(stderr, "jelly: GPU GL crashed at startup (memory pressure?); using software rendering\n");
-      software = 1;
-      continue;
-    }
-    if (now() - windowStart > 60) { windowStart = now(); restarts = 0; }
-    if (++restarts > 4) { fprintf(stderr, "jelly: crashed too often, giving up\n"); return 1; }
-    fprintf(stderr, "jelly: crashed (signal %d), restarting\n", WIFSIGNALED(st) ? WTERMSIG(st) : 0);
-  }
-}
 
 int main(int argc, char **argv) {
-  (void)argc;
-  if (!getenv("JELLY_CHILD") && !getenv("JELLY_NO_WATCHDOG")) return watchdog(argv[0]);
-  softGL = getenv("LIBGL_ALWAYS_SOFTWARE") != NULL;
+#ifndef JELLY_VERSION
+#define JELLY_VERSION "dev"
+#endif
+  if (argc > 1 && !strcmp(argv[1], "--version")) { printf("jev-jelly %s\n", JELLY_VERSION); return 0; }
+  int guard = plat_main_guard(argc, argv); // a crash watchdog where there is one
+  if (guard >= 0) return guard;
   srand((unsigned)time(NULL));
   signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
   cfg_load();
@@ -1091,11 +998,9 @@ int main(int argc, char **argv) {
   cT = cosf(TILT); sT = sinf(TILT);
   build_mesh(); build_anchors();
 
-  setlocale(LC_CTYPE, ""); // for the input method (CJK typing); numbers stay in the C locale
-  dpy = XOpenDisplay(NULL);
-  if (!dpy) { fprintf(stderr, "cannot open X display\n"); return 1; }
-  XSetErrorHandler(on_xerror);
-  SW = DisplayWidth(dpy, DefaultScreen(dpy)); SH = DisplayHeight(dpy, DefaultScreen(dpy));
+  if (!plat_init(0)) return 1;
+  softGL = plat_soft_gl();
+  plat_screen(&SW, &SH);
   apply_size(1);
   Fx = SW * frand(0.35f, 0.65f); Fy = by1 - frand(0, SH * 0.25f);
   // arrive by dropping in from above
@@ -1103,8 +1008,6 @@ int main(int argc, char **argv) {
   create_window();
   gl_init();
   cal_start();
-  kb_global_init(dpy);
-  chat_init(dpy, fb, ctx);
   llm_start();
   if (getenv("JELLY_CHAT_SELFTEST")) { // debugging aid: one message through the chat path, reply on stderr
     // several questions separated by '|' are queued at once and answered in order
@@ -1115,7 +1018,7 @@ int main(int argc, char **argv) {
       char q[1200], r[8192], how[80];
       int k = llm_take_reply(q, sizeof q, r, sizeof r, how, sizeof how);
       if (k) { got++; fprintf(stderr, "selftest %s [%s] Q: %s\nA: %s\n", k > 0 ? "reply" : "error", how, q, r); }
-      else usleep(100000);
+      else plat_sleep(0.1);
     }
     return 0;
   }
@@ -1129,33 +1032,36 @@ int main(int argc, char **argv) {
   if (getenv("JELLY_OPEN_EVENTS")) { opt_open(80, 80); opt_show_events(1); } // debugging aid: panel + events list
   compute_normals();
 
-  double last = now(), acc = 0, shapeT = 0, raiseT = 0;
+  // CI smoke test: JELLY_SMOKE=<seconds> runs that long, then quits (JELLY_SMOKE_OUT gets the frame count)
+  double smokeEnd = getenv("JELLY_SMOKE") ? now() + atof(getenv("JELLY_SMOKE")) : 0;
+  long frames = 0;
+  double last = now(), acc = 0, shapeT = 0, raiseT = 0, startT = now();
   const double DT = 1.0 / 240.0;
   while (running) {
     double frameStart = now();
-    while (XPending(dpy)) {
-      XEvent e; XNextEvent(dpy, &e);
-      if (XFilterEvent(&e, None)) continue; // the input method takes what it needs first
-      if (opt_owns(e.xany.window)) { opt_event(&e); continue; }
-      if (chat_owns(e.xany.window)) { chat_event(&e); continue; }
-      if (bub_owns(e.xany.window)) { bub_event(&e); continue; }
-      if (e.type == ButtonPress && e.xbutton.button == Button1) {
+    frames++;
+    if (smokeEnd > 0 && frameStart > smokeEnd) running = 0;
+    PEvent e;
+    while (plat_poll(&e)) {
+      if (opt_event(&e) || chat_event(&e) || bub_event(&e)) continue;
+      if (e.win != win) continue;
+      if (e.type == PE_BUTTON && e.button == PB_LEFT && e.down) {
         // three quick clicks open the chat box
         static double clicks[3];
         clicks[0] = clicks[1]; clicks[1] = clicks[2]; clicks[2] = frameStart;
         if (clicks[2] - clicks[0] < 0.7) { wantChat = 1; clicks[0] = clicks[1] = clicks[2] = 0; }
         if (chat_mode() == CH_WAIT) wantChat = 1; // it's thinking with the box hidden: one click shows the questions
         pressed = 1; dragging = 0; pressT = frameStart;
-        pressX = curX = e.xbutton.x_root; pressY = curY = e.xbutton.y_root;
-        pressPick = pick_vertex((float)e.xbutton.x, (float)e.xbutton.y);
+        pressX = curX = e.rx; pressY = curY = e.ry;
+        pressPick = pick_vertex(e.x, e.y);
         grabOffX = curX - Fx; grabOffY = curY - (Fy - hopPx);
         trkN = 0; track(frameStart, curX, curY);
         update_input_shape();
-      } else if (e.type == ButtonPress && e.xbutton.button == Button3) {
+      } else if (e.type == PE_BUTTON && e.button == PB_RIGHT && e.down) {
         if (opt_is_open()) { opt_close(); cfg_save(); }
         else opt_open(winX + (int)(W * 0.5f + R * 1.6f), winY + (int)(footY - R * 3.0f));
-      } else if (e.type == MotionNotify) {
-        float nx = e.xmotion.x_root, ny = e.xmotion.y_root;
+      } else if (e.type == PE_MOVE) {
+        float nx = e.rx, ny = e.ry;
         if (pressed && !dragging && hypotf(nx - pressX, ny - pressY) > 6) {
           dragging = 1; st = ST_DRAG; exprT = 0; flingMax = 0; Vx = Vy = 0;
           grabbed = pressPick;
@@ -1178,7 +1084,7 @@ int main(int argc, char **argv) {
         }
         curX = nx; curY = ny;
         if (pressed) track(frameStart, nx, ny);
-      } else if (e.type == ButtonRelease && e.xbutton.button == Button1) {
+      } else if (e.type == PE_BUTTON && e.button == PB_LEFT && !e.down) {
         if (dragging) {
           // a slime doesn't leave with the hand's full speed: some goes into wobble
           float vx, vy; tracked_velocity(frameStart, &vx, &vy);
@@ -1201,10 +1107,7 @@ int main(int argc, char **argv) {
     if (fdt > 0.1) fdt = 0.1;
 
     // eyes follow the cursor when it's near
-    if (!pressed) {
-      Window r, c; int rx, ry, wx, wy; unsigned int mk;
-      if (XQueryPointer(dpy, DefaultRootWindow(dpy), &r, &c, &rx, &ry, &wx, &wy, &mk)) { curX = rx; curY = ry; }
-    }
+    if (!pressed) plat_cursor(&curX, &curY);
     float cdx = curX - Fx, cdy = curY - (Fy - R), cd = hypotf(cdx, cdy);
     // eyes follow the mouse anywhere on screen while it's moving; after a few idle seconds it looks around on its own
     static double mouseMovedAt; static float mlx, mly;
@@ -1240,24 +1143,17 @@ int main(int argc, char **argv) {
         if (exprT <= 0 || expr == EX_CURIOUS) set_expr(EX_CURIOUS, 0.25f);
       } else if (cd > 420) { questioned = 0; stillT = 0; }
     }
-    // is someone at the desk? keyboard / mouse idle time from the X screensaver extension (loaded at runtime)
+    // is someone at the desk? keyboard / mouse idle time from the system (or at least the pointer's)
     {
-      static int tried; static void *(*xssAlloc)(void); static int (*xssQuery)(Display *, Drawable, void *);
-      static void *xssInfo; static double lastCheck, lastCal;
-      typedef struct { Window window; int state, kind; unsigned long til_or_since, idle, eventMask; } XSSInfo;
-      if (!tried) {
-        tried = 1;
-        void *h = dlopen("libXss.so.1", RTLD_NOW | RTLD_LOCAL);
-        if (h) { xssAlloc = (void *(*)(void))dlsym(h, "XScreenSaverAllocInfo"); xssQuery = (int (*)(Display *, Drawable, void *))dlsym(h, "XScreenSaverQueryInfo"); }
-        if (xssAlloc && xssQuery) xssInfo = xssAlloc();
-      }
+      static double lastCheck, lastCal;
       if (t - lastCheck > 2) {
         lastCheck = t;
         static double pointerAt; static float ppx, ppy;
         if (hypotf(curX - ppx, curY - ppy) > 1) pointerAt = t;
         ppx = curX; ppy = curY;
         double idle = t - pointerAt;
-        if (xssInfo && xssQuery(dpy, DefaultRootWindow(dpy), xssInfo)) idle = ((XSSInfo *)xssInfo)->idle / 1000.0;
+        double sysIdle = plat_idle_seconds();
+        if (sysIdle >= 0) idle = sysIdle;
         int atDesk = idle < 60;
         if (atDesk && !bub_visible() && t - lastCal > 5) {
           lastCal = t;
@@ -1311,8 +1207,8 @@ int main(int argc, char **argv) {
     compute_normals();
 
     int nx = (int)lroundf(Fx - W * 0.5f), ny = (int)lroundf(Fy - footY);
-    if (nx != winX || ny != winY) { XMoveWindow(dpy, win, nx, ny); winX = nx; winY = ny; }
-    if (t - raiseT > 2 && !opt_is_open()) { XRaiseWindow(dpy, win); raiseT = t; }
+    if (nx != winX || ny != winY) { pw_move(win, nx, ny); winX = nx; winY = ny; }
+    if (t - raiseT > 2 && !opt_is_open()) { pw_raise(win); raiseT = t; }
 
     static int dbg = -1; static double dbgT;
     if (dbg < 0) dbg = getenv("JELLY_DEBUG") != NULL;
@@ -1321,8 +1217,10 @@ int main(int argc, char **argv) {
       fprintf(stderr, "st=%d hop=%d F=%.0f,%.0f V=%.0f,%.0f hopPx=%.1f sq=%.2f trail=%.0f,%.0f yaw=%.2f pull=%.2f press=%d grab=%d cur=%.0f,%.0f\n",
               st, hopst, Fx, Fy, Vx, Vy, hopPx, sq, trailX, trailY, yaw, pullAmt, pressed, grabbed, curX, curY);
     }
+    pw_begin(win);
     render();
-    glXSwapBuffers(dpy, win);
+    shot_maybe("jelly", W, H, t - startT);
+    pw_present(win);
 
     // right-click panel: edits apply live
     float oldSize = cfg.size; int oldGirl = cfg.girl, oldFlavor = cfg.flavor;
@@ -1371,6 +1269,7 @@ int main(int argc, char **argv) {
         lookTY = -0.6f;
       }
     }
+    if (frames == 20 && getenv("JELLY_PREVIEW")) of |= OPT_PREVIEW; // debugging aid: show a reminder
     if (of & OPT_PREVIEW) { // the next event, or a sample if there's nothing on the calendar
       CalEvent evs_[4]; int n = cal_events(evs_, 4), k = -1; time_t now_ = time(NULL);
       for (int i = 0; i < n && k < 0; i++) if (evs_[i].end > now_ || evs_[i].start > now_) k = i;
@@ -1387,16 +1286,17 @@ int main(int argc, char **argv) {
       if (bf == BUB_POPPED) { set_expr(EX_HAPPY, 1.6f); surf_pulse(1.2f); spawn(14, 0.4f * R, -1.6f * R); }
     }
     if (t - shapeT > 1.0 / 30) { update_input_shape(); shapeT = t; }
-    XFlush(dpy);
+    plat_flush();
 
     // cap to ~60 fps, and idle lighter while napping
     double target = (st == ST_REST && restAge > 3) || softGL ? 1.0 / 30 : 1.0 / 60; // software GL: 30 fps
     double spent = now() - frameStart;
-    if (spent < target) usleep((useconds_t)((target - spent) * 1e6));
+    if (spent < target) plat_sleep(target - spent);
   }
-  glXMakeCurrent(dpy, None, NULL);
-  glXDestroyContext(dpy, ctx);
-  XDestroyWindow(dpy, win);
-  XCloseDisplay(dpy);
+  if (getenv("JELLY_SMOKE_OUT")) {
+    FILE *f = fopen(getenv("JELLY_SMOKE_OUT"), "w");
+    if (f) { fprintf(f, "frames=%ld soft=%d screen=%dx%d\n", frames, softGL, SW, SH); fclose(f); }
+  }
+  plat_quit();
   return 0;
 }

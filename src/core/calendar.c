@@ -8,19 +8,12 @@
 #define _GNU_SOURCE
 #include "jelly.h"
 #include <ctype.h>
-#include <fcntl.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
 #include <time.h>
-#include <unistd.h>
 
-extern char **environ;
 
 #define MAXEV 800
 #define WINDOW_BACK (60 * 60)       // keep events that started up to an hour ago (still "now")
@@ -41,15 +34,12 @@ static char status[160] = "No calendars yet";
 
 /* ------------------------------------------------------------------ urls file */
 
-static void urls_path(char *out, size_t n) {
-  const char *h = getenv("HOME");
-  snprintf(out, n, "%s/.config/jev-jelly/calendars", h ? h : ".");
-}
+static void urls_path(char *out, size_t n) { plat_config_path("calendars", out, n); }
 static void urls_save(void) { // caller holds mx
   char p[512]; urls_path(p, sizeof p);
   FILE *f = fopen(p, "w");
   if (!f) return;
-  chmod(p, 0600); // a secret iCal link is a password to your calendar
+  plat_private_file(p); // a secret iCal link is a password to your calendar
   for (int i = 0; i < nsrc; i++) fprintf(f, "%s%s\n", src[i].enabled ? "" : "!", src[i].url);
   fclose(f);
 }
@@ -151,30 +141,15 @@ static const char *zone_for(const char *tzid) {
   if (!tzid || !*tzid) return NULL;
   for (size_t i = 0; i < sizeof WIN_TZ / sizeof WIN_TZ[0]; i++)
     if (!strcmp(tzid, WIN_TZ[i][0])) return WIN_TZ[i][1];
-  if (strstr(tzid, "..")) return NULL;
-  char p[256]; snprintf(p, sizeof p, "/usr/share/zoneinfo/%s", tzid);
-  return access(p, R_OK) == 0 ? tzid : NULL;
+  return plat_zone_known(tzid) ? tzid : NULL;
 }
 
-/* Everything that runs mktime for a zone happens inside one of these scopes, holding tzmx. */
-static char savedTZ[256]; static int hadTZ, switched;
-static void tz_enter(const char *zone) {
-  pthread_mutex_lock(&tzmx);
-  switched = 0;
-  if (!zone) return;
-  const char *o = getenv("TZ");
-  hadTZ = o != NULL;
-  if (hadTZ) snprintf(savedTZ, sizeof savedTZ, "%s", o);
-  char z[300]; snprintf(z, sizeof z, ":%s", zone);
-  setenv("TZ", z, 1); tzset(); switched = 1;
-}
-static void tz_leave(void) {
-  if (switched) { if (hadTZ) setenv("TZ", savedTZ, 1); else unsetenv("TZ"); tzset(); }
-  pthread_mutex_unlock(&tzmx);
-}
-void cal_localtime(time_t t, struct tm *out) {
-  pthread_mutex_lock(&tzmx); localtime_r(&t, out); pthread_mutex_unlock(&tzmx);
-}
+/* Times in an event's zone are converted inside one of these scopes (it names the zone for dt_conv). Plain date
+   arithmetic (the day after, the last of the month) is normalized with timegm, which no zone affects. */
+static const char *curZone;
+static void tz_enter(const char *zone) { pthread_mutex_lock(&tzmx); curZone = zone; }
+static void tz_leave(void) { curZone = NULL; pthread_mutex_unlock(&tzmx); }
+void cal_localtime(time_t t, struct tm *out) { plat_localtime(t, out); }
 
 /* ------------------------------------------------------------------ ICS parsing */
 
@@ -228,7 +203,7 @@ static const char *dt_zone(const Dt *d) { return d->utc ? "UTC" : d->date ? NULL
 /* inside a tz scope for dt_zone(d) */
 static time_t dt_conv(struct tm tm, const Dt *d) {
   tm.tm_isdst = -1;
-  return d->utc ? timegm(&tm) : mktime(&tm);
+  return d->utc ? plat_timegm(&tm) : plat_mktime_in(&tm, curZone);
 }
 static time_t dt_time(const Dt *d) {
   tz_enter(dt_zone(d)); time_t t = dt_conv(d->tm, d); tz_leave(); return t;
@@ -320,7 +295,7 @@ static void expand(const Raw *r, long dur) {
   tz_enter(dt_zone(d));
   struct tm base = d->tm;
   time_t t0 = dt_conv(base, d);
-  { struct tm tmp = base; tmp.tm_isdst = -1; mktime(&tmp); base.tm_wday = tmp.tm_wday; }
+  { struct tm tmp = base; tmp.tm_isdst = -1; plat_timegm(&tmp); base.tm_wday = tmp.tm_wday; }
   int n = 0, guard = 0;
 #define TRY(TM)                                                                           \
   do {                                                                                    \
@@ -349,16 +324,16 @@ static void expand(const Raw *r, long dur) {
     for (int m = 0; guard++ < 5000; m++) {
       struct tm tm = base; tm.tm_mon += m * interval;
       if (ordDay >= 0) { // nth weekday of the month
-        struct tm first = tm; first.tm_mday = 1; first.tm_isdst = -1; mktime(&first);
+        struct tm first = tm; first.tm_mday = 1; first.tm_isdst = -1; plat_timegm(&first);
         if (ord > 0) tm.tm_mday = 1 + (ordDay - first.tm_wday + 7) % 7 + (ord - 1) * 7;
         else {
-          struct tm last = tm; last.tm_mon += 1; last.tm_mday = 0; last.tm_isdst = -1; mktime(&last);
+          struct tm last = tm; last.tm_mon += 1; last.tm_mday = 0; last.tm_isdst = -1; plat_timegm(&last);
           tm.tm_mday = last.tm_mday - (last.tm_wday - ordDay + 7) % 7 + (ord + 1) * 7;
         }
-        struct tm chk = tm; chk.tm_isdst = -1; mktime(&chk);
+        struct tm chk = tm; chk.tm_isdst = -1; plat_timegm(&chk);
         if (chk.tm_mon != ((base.tm_mon + m * interval) % 12 + 12) % 12) continue;
       } else {
-        struct tm chk = tm; chk.tm_isdst = -1; mktime(&chk);
+        struct tm chk = tm; chk.tm_isdst = -1; plat_timegm(&chk);
         if (chk.tm_mday != base.tm_mday) continue; // no Feb 31st
       }
       TRY(tm);
@@ -366,7 +341,7 @@ static void expand(const Raw *r, long dur) {
   } else if (!strcmp(freq, "YEARLY")) {
     for (int y = 0; guard++ < 400; y++) {
       struct tm tm = base; tm.tm_year += y * interval;
-      struct tm chk = tm; chk.tm_isdst = -1; mktime(&chk);
+      struct tm chk = tm; chk.tm_isdst = -1; plat_timegm(&chk);
       if (chk.tm_mday != base.tm_mday) continue;
       TRY(tm);
     }
@@ -444,31 +419,11 @@ static void parse_ics(char *text) {
 /* ------------------------------------------------------------------ fetching */
 
 static char *fetch(const char *url, int *err) {
-  int fd[2];
-  if (pipe(fd)) { *err = 1; return NULL; }
-  posix_spawn_file_actions_t fa;
-  posix_spawn_file_actions_init(&fa);
-  posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
-  posix_spawn_file_actions_addclose(&fa, fd[0]);
-  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-  char *argv[] = {"curl", "-fsSL", "--compressed", "--max-time", "30", "--max-filesize", "33554432", "--", (char *)url, NULL};
-  pid_t pid;
-  int rc = posix_spawnp(&pid, "curl", &fa, NULL, argv, environ);
-  posix_spawn_file_actions_destroy(&fa);
-  close(fd[1]);
-  if (rc) { close(fd[0]); *err = 2; return NULL; }
-  size_t cap = 1 << 16, len = 0;
-  char *buf = malloc(cap);
-  ssize_t k;
-  while ((k = read(fd[0], buf + len, cap - len - 1)) > 0) {
-    len += (size_t)k;
-    if (cap - len < 4096) { cap *= 2; buf = realloc(buf, cap); }
-  }
-  close(fd[0]);
-  int st = 0;
-  waitpid(pid, &st, 0);
-  buf[len] = 0;
-  if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || !strstr(buf, "BEGIN:VCALENDAR")) { free(buf); *err = 3; return NULL; }
+  char *const argv[] = {"curl", "-fsSL", "--compressed", "--max-time", "30", "--max-filesize", "33554432", "--", (char *)url, NULL};
+  int st;
+  char *buf = plat_run("curl", argv, NULL, &st);
+  if (!buf) { *err = 2; return NULL; }
+  if (st != 0 || !strstr(buf, "BEGIN:VCALENDAR")) { free(buf); *err = 3; return NULL; }
   *err = 0;
   return buf;
 }
@@ -636,7 +591,7 @@ void cal_when(const CalEvent *e, time_t now, char *out, size_t n) {
   long dt = (long)(e->start - now);
   struct tm s, t; cal_localtime(e->start, &s); cal_localtime(now, &t);
   struct tm tomorrow = t; tomorrow.tm_mday += 1;
-  pthread_mutex_lock(&tzmx); mktime(&tomorrow); pthread_mutex_unlock(&tzmx);
+  plat_timegm(&tomorrow); // (just normalizes the date)
   int today = s.tm_yday == t.tm_yday && s.tm_year == t.tm_year;
   int tmrw = s.tm_yday == tomorrow.tm_yday && s.tm_year == tomorrow.tm_year;
   char hm[16]; strftime(hm, sizeof hm, "%H:%M", &s);

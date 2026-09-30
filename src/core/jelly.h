@@ -1,7 +1,7 @@
-// Shared between the jelly (jelly.c) and its right-click options panel (options.c).
+// The core's shared declarations: the jelly (jelly.c), its panels (options.c, chat.c, bubble.c), the calendar,
+// the model client and the themes. Nothing here depends on the OS: that's platform/plat.h.
 #pragma once
-#include <X11/Xlib.h>
-#include <GL/glx.h>
+#include "../platform/plat.h"
 
 #define NFLAVORS 7
 extern const char *FLAVOR_NAMES[NFLAVORS];
@@ -23,13 +23,11 @@ enum { FACE_TINY = 0, FACE_CLASSIC = 2 }; // 1 was the retired brows-only face
 
 enum { OPT_NONE = 0, OPT_CHANGED = 1, OPT_NAP = 2, OPT_QUIT = 4, OPT_CLOSED = 8 };
 
-void opt_init(Display *dpy, GLXFBConfig fb, GLXContext shared);
 void opt_open(int x, int y); // screen position of the panel's top-left
 void opt_close(void);
 void opt_show_events(int on);
 int opt_is_open(void);
-int opt_owns(Window w);
-void opt_event(XEvent *e);
+int opt_event(const PEvent *e); // 1 if it was the panel's
 int opt_frame(Cfg *cfg, double dt); // draws the panel, edits cfg live, returns OPT_* flags
 
 /* ---- calendar reminders (calendar.c) ---- */
@@ -62,36 +60,14 @@ void cal_localtime(time_t t, struct tm *out);
 
 /* ---- reminder bubble (bubble.c) ---- */
 enum { BUB_NONE = 0, BUB_POPPED = 1, BUB_EXPIRED = 2 };
-void bub_init(Display *dpy, GLXFBConfig fb, GLXContext shared);
 void bub_show(const CalEvent *e, float tint[3], double lifetime); // seconds on screen
 int bub_visible(void);
-int bub_owns(Window w);
-void bub_event(XEvent *e);
+int bub_event(const PEvent *e);
 int bub_frame(double dt, float anchorX, float anchorY, float jellyR); // anchor: top of the jelly's head, screen px
 void bub_center(float *x, float *y);
 
 /* options panel additions */
 enum { OPT_PREVIEW = 16 };
-
-/* ---- keyboard for the ImGui windows (kbd.c) ---- */
-typedef struct {
-  Window win, prevFocus;
-  XIC ic;
-  int focused, prevRevert, wantPaste, prevWant, grabTries;
-  double grabAt;
-} Kbd;
-void kb_global_init(Display *dpy);
-void kb_attach(Kbd *k, Window w);
-void kb_prepare_window(Window w);             // managed but chrome-less, above all: so it can hold the keyboard
-void kb_grab(Kbd *k);
-void kb_grab_soon(Kbd *k, double now);        // grab once the window manager has actually shown the window
-void kb_tick(Kbd *k, double now);             // call every frame: carries out kb_grab_soon                         // take the keyboard (the window must be mapped)
-void kb_release(Kbd *k);                      // hand it back to whoever had it
-void kb_sync(Kbd *k, int wantText);           // grab while ImGui wants text, release when it doesn't
-void kb_clicked(Kbd *k);                      // clicked inside: take the keyboard back if a field is active
-int kb_event(Kbd *k, XEvent *e, void *imguiIO); // KeyPress / KeyRelease / FocusIn / FocusOut -> ImGui
-void kb_request_paste(Kbd *k);
-int kb_paste_arrived(Kbd *k, XEvent *e, void *imguiIO, int singleLine);
 
 /* ---- chat with an OpenAI-compatible model (llm.c) ---- */
 #define NROUTES 3
@@ -159,10 +135,8 @@ void llm_history_delete(void);
 /* ---- chat box (chat.c) ---- */
 enum { CH_HIDDEN, CH_INPUT, CH_WAIT, CH_REPLY };
 enum { CHAT_NONE = 0, CHAT_SENT = 1, CHAT_REPLIED = 2, CHAT_ERROR = 4, CHAT_CLOSED = 8 };
-void chat_init(Display *dpy, GLXFBConfig fb, GLXContext shared);
 void chat_open(float headX, float headY, float jellyR);
-int chat_owns(Window w);
-void chat_event(XEvent *e);
+int chat_event(const PEvent *e);
 int chat_frame(double dt, float headX, float headY, float jellyR, const float tint[3]);
 int chat_mode(void);
 int chat_busy(void);                             // questions are being answered (the jelly thinks)

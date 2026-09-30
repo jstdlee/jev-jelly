@@ -1,0 +1,4 @@
+// The app icon, and the manifest: UTF-8 as the process code page (so file names and environment are UTF-8, like
+// Linux), per-monitor DPI awareness, and Windows 10 / 11 compatibility.
+1 ICON "jev-jelly.ico"
+1 24 "jelly.manifest"

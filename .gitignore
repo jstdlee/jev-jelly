@@ -1,4 +1,6 @@
 build/
 /jelly
+/jelly.exe
 third_party/sysroot/
 third_party/lib/
+third_party/mingw/

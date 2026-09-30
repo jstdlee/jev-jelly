@@ -3,23 +3,18 @@
 // appear one by one) when it shows up, and when it's clicked or after ten minutes. Bright colors on dark desktops,
 // deeper ones on light desktops (sampled from what's behind), with a faint shadow.
 // Japanese, Chinese and Korean titles use the matching Noto Sans CJK face.
-// Its own borderless ARGB window and ImGui context, like the options panel.
+// Its own transparent surface and ImGui context, like the options panel.
 
-#define GL_GLEXT_PROTOTYPES
-#define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
-#include "cimgui.h"
+#include "ui.h"
 #define CIMGUI_USE_OPENGL3
 #include "cimgui_impl.h"
+#include "gl.h"
 #include "jelly.h"
-#include <X11/Xutil.h>
-#include <X11/extensions/shape.h>
-#include <GL/gl.h>
-#include <GL/glext.h>
+#include "shot.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define LIFETIME (10 * 60.0) // a real reminder stays up to ten minutes (a preview only a few seconds)
 #define WW 600 // window: room for a few lines of words
@@ -27,17 +22,13 @@
 #define CELL 3.0f // LED pitch in pixels
 #define MAXCH 160
 
-static Display *dpy;
-static GLXFBConfig fbc;
-static Window win;
-static GLXContext ctx;
-static ImGuiContext *ig;
+static Ui ui;
+static int created;
 static ImFont *fonts[3], *font; // CJK faces: JP, KR, SC (their Latin letters are Noto Sans)
-static int visible, leaving, mapped, clicked;
+static int visible, leaving, clicked;
 static CalEvent ev;
 static double age, leaveT;
 static float bx = -1, by, bvx, bvy; // center of the words on screen; they float after a target beside the jelly
-static int wx, wy;
 static float ink = 0.15f, inkT = 0.15f; // 0.15 = on a light desktop, 0.97 = on a dark one; eases between them
 static float hue0;                       // the rainbow starts at the jelly's own hue
 static GLuint fbo, tex, prog, vao;
@@ -54,49 +45,31 @@ static int nlines;
 static char whenStr[64], whereStr[100];
 static float boxW, boxH;
 
-void bub_init(Display *d, GLXFBConfig fb, GLXContext shared) { dpy = d; fbc = fb; ctx = shared; }
 int bub_visible(void) { return visible; }
-int bub_owns(Window w) { return mapped && w == win; }
 void bub_center(float *x, float *y) { *x = bx; *y = by; }
 
 static void create(void) {
-  XVisualInfo *vi = glXGetVisualFromFBConfig(dpy, fbc);
-  Window root = DefaultRootWindow(dpy);
-  XSetWindowAttributes swa = {0};
-  swa.colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
-  swa.override_redirect = True;
-  swa.event_mask = ButtonPressMask | ButtonReleaseMask;
-  win = XCreateWindow(dpy, root, 0, 0, WW, WH, 0, vi->depth, InputOutput, vi->visual,
-                      CWColormap | CWBorderPixel | CWBackPixel | CWOverrideRedirect | CWEventMask, &swa);
-  XStoreName(dpy, win, "jelly reminder");
-  XFree(vi);
-  // drawn with the jelly's own GL context (same visual): no new context is ever created
-
-  // GL objects belong to the (shared) context, so they're created while the jelly's window is current: making the
-  // context current on a window that was never mapped corrupts later draws on this NVIDIA driver
-  GLXContext pc = glXGetCurrentContext(); GLXDrawable pd = glXGetCurrentDrawable();
-  ig = igCreateContext(NULL);
-  igSetCurrentContext(ig);
+  ui_init(&ui, "jelly reminder", WW, WH, 0, 0);
+  created = 1;
   ImGuiIO *io = igGetIO_Nil();
-  io->IniFilename = NULL;
   // glyphs are rasterized on demand (Dear ImGui 1.92), so the big CJK faces cost nothing until used
-  const char *cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc";
-  const char *cjk2 = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
-  const char *latin = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf";
-  const char *path = access(cjk, R_OK) == 0 ? cjk : access(cjk2, R_OK) == 0 ? cjk2 : NULL;
+  char path[512], latin[512];
+  int haveCjk = plat_font(2, path, sizeof path), haveLatin = plat_font(0, latin, sizeof latin);
+  int noto = haveCjk && strstr(path, "NotoSansCJK") && strstr(path, ".ttc"); // one face each for JP, KR and SC
   for (int i = 0; i < 3; i++) {
-    if (path) {
+    if (haveCjk && (noto || i == 0)) {
       ImFontConfig *fc = ImFontConfig_ImFontConfig();
-      fc->FontNo = (ImU32)i; // collection faces: 0 JP, 1 KR, 2 SC
+      if (noto) fc->FontNo = (ImU32)i; // collection faces: 0 JP, 1 KR, 2 SC
       fonts[i] = ImFontAtlas_AddFontFromFileTTF(io->Fonts, path, 20.0f, fc, NULL);
       ImFontConfig_destroy(fc);
-    } else if (access(latin, R_OK) == 0) {
+    } else if (haveCjk && i > 0) {
+      fonts[i] = fonts[0];
+    } else if (haveLatin) {
       fonts[i] = ImFontAtlas_AddFontFromFileTTF(io->Fonts, latin, 20.0f, NULL, NULL);
     } else {
       fonts[i] = ImFontAtlas_AddFontDefault(io->Fonts, NULL);
     }
   }
-  ImGui_ImplOpenGL3_Init("#version 330 core");
 
   // offscreen target for the text, and the LED shader that redraws it as dots
   glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
@@ -105,7 +78,7 @@ static void create(void) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, pw_framebuffer(ui.win));
   static const char *vs = "#version 330 core\n"
       "void main(){ vec2 p = vec2((gl_VertexID & 1) * 4.0 - 1.0, (gl_VertexID >> 1) * 4.0 - 1.0); gl_Position = vec4(p, 0, 1); }\n";
   static const char *fs = "#version 330 core\n"
@@ -127,7 +100,6 @@ static void create(void) {
   uOn = glGetUniformLocation(prog, "uOn"); uBright = glGetUniformLocation(prog, "uBright");
   uHue = glGetUniformLocation(prog, "uHue");
   glGenVertexArrays(1, &vao);
-  glXMakeCurrent(dpy, pd, pc);
 }
 
 /* next UTF-8 character: returns its byte length and codepoint */
@@ -214,8 +186,8 @@ static void relayout(void) {
       b[o] = 0; fprintf(stderr, "layout %d: w=%.0f '%s'\n", i, lineW[i], b);
     }
   // only the words take clicks
-  XRectangle r = {(short)((WW - boxW) / 2 - 10), (short)((WH - boxH) / 2 - 8), (unsigned short)(boxW + 20), (unsigned short)(boxH + 16)};
-  XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, &r, 1, ShapeSet, Unsorted);
+  PRect r = {(int)((WW - boxW) / 2 - 10), (int)((WH - boxH) / 2 - 8), (int)(boxW + 20), (int)(boxH + 16)};
+  pw_input_rects(ui.win, &r, 1);
 }
 
 static double lifetime = LIFETIME;
@@ -224,7 +196,7 @@ void bub_show(const CalEvent *e, float t[3], double life) {
   lifetime = life > 0 ? life : LIFETIME;
   float sat, v;
   igColorConvertRGBtoHSV(t[0], t[1], t[2], &hue0, &sat, &v);
-  if (!win) create();
+  if (!created) create();
   ev = *e;
   font = pick_font(ev.title);
   snprintf(whereStr, sizeof whereStr, "%s", ev.where);
@@ -234,39 +206,23 @@ void bub_show(const CalEvent *e, float t[3], double life) {
   visible = 1;
 }
 
-void bub_event(XEvent *e) {
-  if (visible && e->type == ButtonPress && e->xbutton.button == Button1) clicked = 1;
+int bub_event(const PEvent *e) {
+  if (!created || e->win != ui.win) return 0;
+  if (visible && e->type == PE_BUTTON && e->button == PB_LEFT && e->down) clicked = 1;
+  return 1;
 }
 
 /* is the desktop behind the words light or dark? pick the ink accordingly */
 static void sample_background(void) {
-  int sw = DisplayWidth(dpy, DefaultScreen(dpy)), sh = DisplayHeight(dpy, DefaultScreen(dpy));
-  int x = wx + (int)((WW - boxW) / 2), y = wy + (int)((WH - boxH) / 2), w = (int)boxW, h = (int)boxH;
-  if (x < 0) { w += x; x = 0; }
-  if (y < 0) { h += y; y = 0; }
-  if (x + w > sw) w = sw - x;
-  if (y + h > sh) h = sh - y;
-  if (w < 8 || h < 8) return;
-  XImage *im = XGetImage(dpy, DefaultRootWindow(dpy), x, y, (unsigned)w, (unsigned)h, AllPlanes, ZPixmap);
-  if (!im) return;
-  double sum = 0; int n = 0;
-  for (int j = 0; j < h; j += 6)
-    for (int i = 0; i < w; i += 6) {
-      unsigned long p = XGetPixel(im, i, j);
-      sum += 0.2126 * ((p >> 16) & 255) + 0.7152 * ((p >> 8) & 255) + 0.0722 * (p & 255);
-      n++;
-    }
-  XDestroyImage(im);
-  float lum = n ? (float)(sum / n / 255) : 1;
-  inkT = lum > 0.5f ? 0.15f : 0.97f;
+  float lum = plat_screen_luma(ui.x + (int)((WW - boxW) / 2), ui.y + (int)((WH - boxH) / 2), (int)boxW, (int)boxH);
+  if (lum >= 0) inkT = lum > 0.5f ? 0.15f : 0.97f;
 }
-
 
 int bub_frame(double dt, float ax, float ay, float jr) {
   if (!visible) return BUB_NONE;
   int out = BUB_NONE;
   age += dt;
-  int sw = DisplayWidth(dpy, DefaultScreen(dpy));
+  int sw, sh; plat_screen(&sw, &sh);
 
   // float beside and a little above the jelly's head, on whichever side has room
   float side = ax + jr + boxW + 60 < sw ? 1.f : -1.f;
@@ -278,16 +234,7 @@ int bub_frame(double dt, float ax, float ay, float jr) {
   bvy += (w * w * (ty - by) - 2 * 0.7f * w * bvy) * (float)dt;
   bx += bvx * (float)dt; by += bvy * (float)dt;
 
-  GLXContext pc = glXGetCurrentContext(); GLXDrawable pd = glXGetCurrentDrawable();
-  glXMakeCurrent(dpy, win, ctx);
-  static int swapSet; // no vsync wait here: the jelly's own swap paces the loop
-  if (!swapSet) {
-    typedef void (*SwapFn)(Display *, GLXDrawable, int);
-    SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-    if (si) si(dpy, win, 0);
-    swapSet = 1;
-  }
-  igSetCurrentContext(ig);
+  igSetCurrentContext(ui.ig);
 
   // the countdown ticks on
   char when[64]; cal_when(&ev, time(NULL), when, sizeof when);
@@ -299,23 +246,17 @@ int bub_frame(double dt, float ax, float ay, float jr) {
   if (leaving) leaveT += dt;
   if (leaving && leaveT > leaveDur) {
     visible = 0;
-    if (mapped) { XUnmapWindow(dpy, win); mapped = 0; }
-    glXMakeCurrent(dpy, pd, pc);
+    pw_hide(ui.win);
     return out;
   }
 
   int nx = (int)lroundf(bx - WW / 2.f), ny = (int)lroundf(by - WH / 2.f);
-  if (!mapped) { XMoveWindow(dpy, win, nx, ny); XMapRaised(dpy, win); mapped = 1; }
-  else if (nx != wx || ny != wy) XMoveWindow(dpy, win, nx, ny);
-  wx = nx; wy = ny;
+  if (!pw_visible(ui.win)) { ui_move(&ui, nx, ny); pw_show(ui.win); }
+  else if (nx != ui.x || ny != ui.y) ui_move(&ui, nx, ny);
   if (age - sampleAt > 1.2 || sampleAt == 0) { sampleAt = age; sample_background(); }
   ink += (inkT - ink) * fminf(1, (float)dt * 3);
 
-  ImGuiIO *io = igGetIO_Nil();
-  io->DisplaySize = (ImVec2_c){WW, WH};
-  io->DeltaTime = dt > 0 ? (float)dt : 1.f / 60;
-  ImGui_ImplOpenGL3_NewFrame();
-  igNewFrame();
+  ui_frame_begin(&ui, dt);
   if (needLayout) { relayout(); needLayout = 0; }
   ImDrawList *dl = igGetForegroundDrawList_ViewportPtr(NULL);
 
@@ -343,7 +284,7 @@ int bub_frame(double dt, float ax, float ay, float jr) {
   glClearColor(0, 0, 0, 0);
   glClear(GL_COLOR_BUFFER_BIT);
   ImGui_ImplOpenGL3_RenderDrawData(igGetDrawData());
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, pw_framebuffer(ui.win));
   glClear(GL_COLOR_BUFFER_BIT);
   glDisable(GL_SCISSOR_TEST);
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -353,7 +294,7 @@ int bub_frame(double dt, float ax, float ay, float jr) {
   glUniform1f(uTime, (float)age); glUniform1f(uOn, on * 1.1f - 0.05f); glUniform1f(uFade, 1);
   glUniform1f(uHue, hue0);
   glDrawArrays(GL_TRIANGLES, 0, 3);
-  glXSwapBuffers(dpy, win);
-  glXMakeCurrent(dpy, pd, pc);
+  shot_maybe("jelly-reminder", WW, WH, age > 2.5 ? 1e9 : 0); // once the words have appeared
+  pw_present(ui.win);
   return out;
 }

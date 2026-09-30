@@ -7,19 +7,13 @@
 #include "jelly.h"
 #include <ctype.h>
 #include <math.h>
-#include <fcntl.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
 #include <time.h>
-#include <unistd.h>
 
-extern char **environ;
 
 /* The three route prompts. Quick is deliberately tiny (it's sent with every small-talk message and the model should
    answer in a breath); Think asks for worked reasoning; Research is about grounding the answer in fresh results. */
@@ -176,10 +170,7 @@ static const char *ACTION_PROMPT =
 
 /* ------------------------------------------------------------------ settings */
 
-static void path_of(const char *name, char *out, size_t n) {
-  const char *h = getenv("HOME");
-  snprintf(out, n, "%s/.config/jev-jelly/%s", h ? h : ".", name);
-}
+static void path_of(const char *name, char *out, size_t n) { plat_config_path(name, out, n); }
 
 LlmCfg *llm_cfg(void) { return &cfg; }
 void llm_reset_prompt(int r) {
@@ -290,7 +281,7 @@ void llm_cfg_save(void) {
   char p[512]; path_of("llm.conf", p, sizeof p);
   FILE *f = fopen(p, "w");
   if (!f) return;
-  chmod(p, 0600); // holds API keys
+  plat_private_file(p); // holds API keys
   fprintf(f, "base=%s\nmodel=%s\nkey=%s\ntemperature=%.2f\nsave_history=%d\nrouter_on=%d\nrouter_url=%s\n",
           cfg.base, cfg.model, cfg.key, cfg.temperature, cfg.saveHistory, cfg.routerOn, cfg.routerUrl);
   put_multi(f, "router_schema", cfg.routerSchema);
@@ -333,46 +324,23 @@ static void cfg_quote(Buf *b, const char *s) { // a double-quoted curl config va
 /* Runs a program with `in` on stdin; returns its stdout (malloc'd) and exit status. The program is found on PATH
    or at `fallback`. */
 static char *run_capture(const char *prog, const char *fallback, char **argv, const char *in, int *status) {
-  int pin[2], pout[2];
-  *status = -1;
-  if (pipe(pin) || pipe(pout)) return NULL;
-  posix_spawn_file_actions_t fa;
-  posix_spawn_file_actions_init(&fa);
-  posix_spawn_file_actions_adddup2(&fa, pin[0], 0);
-  posix_spawn_file_actions_adddup2(&fa, pout[1], 1);
-  posix_spawn_file_actions_addclose(&fa, pin[1]);
-  posix_spawn_file_actions_addclose(&fa, pout[0]);
-  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-  pid_t pid;
-  int rc = posix_spawnp(&pid, prog, &fa, NULL, argv, environ);
-  if (rc && fallback && access(fallback, X_OK) == 0) rc = posix_spawn(&pid, fallback, &fa, NULL, argv, environ);
-  posix_spawn_file_actions_destroy(&fa);
-  close(pin[0]); close(pout[1]);
-  if (rc) { close(pin[1]); close(pout[0]); return NULL; }
-  if (in && write(pin[1], in, strlen(in)) < 0) {}
-  close(pin[1]);
-  Buf out = {0}; char chunk[8192]; ssize_t k;
-  bput(&out, "", 0);
-  while ((k = read(pout[0], chunk, sizeof chunk)) > 0) bput(&out, chunk, (size_t)k);
-  close(pout[0]);
-  int st = 0; waitpid(pid, &st, 0);
-  *status = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
-  return out.s;
+  char *out = plat_run(prog, argv, in, status);
+  if (!out && fallback && strcmp(fallback, prog)) out = plat_run(fallback, argv, in, status);
+  return out;
 }
 
 /* An HTTP request through curl (config on stdin, so keys never appear in the process list). GET when body is NULL.
    `headers` is a list of extra header lines. On success returns the body in *raw. */
 static Reply http(const char *url, const char **headers, int nh, const char *body, int maxSecs, char **raw) {
   Reply r = {0};
-  struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-  const char *dir = getenv("XDG_RUNTIME_DIR");
-  char tmp[512]; snprintf(tmp, sizeof tmp, "%s/jev-jelly-XXXXXX", dir && *dir ? dir : "/tmp");
+  double t0 = plat_now();
+  char tmp[512] = "";
   if (body) {
-    int fd = mkstemp(tmp); // 0600
-    if (fd < 0) { snprintf(r.err, sizeof r.err, "couldn't write a temp file"); return r; }
-    if (write(fd, body, strlen(body)) < 0) {}
-    close(fd);
-  } else tmp[0] = 0;
+    FILE *tf = plat_temp_file(tmp, sizeof tmp); // private to the user
+    if (!tf) { snprintf(r.err, sizeof r.err, "couldn't write a temp file"); return r; }
+    fputs(body, tf);
+    fclose(tf);
+  }
   Buf conf = {0};
   bstr(&conf, "url = "); cfg_quote(&conf, url); bstr(&conf, "\n");
   if (body) bstr(&conf, "header = \"Content-Type: application/json\"\n");
@@ -383,9 +351,8 @@ static Reply http(const char *url, const char **headers, int nh, const char *bod
   int st;
   char *resp = run_capture("curl", NULL, argv, conf.s, &st);
   free(conf.s);
-  if (*tmp) unlink(tmp);
-  struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-  r.secs = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  if (*tmp) remove(tmp);
+  r.secs = plat_now() - t0;
   if (!resp) { snprintf(r.err, sizeof r.err, "curl is not installed"); return r; }
   char *nl = strrchr(resp, '\n');
   if (nl) { r.code = atoi(nl + 1); *nl = 0; }
@@ -602,20 +569,14 @@ static int web_search(const LlmCfg *c, const char *query, Hit *hits, int max, ch
 
 static char ompPath[512];
 int llm_agent_available(void) {
-  if (!*ompPath) {
-    const char *h = getenv("HOME");
-    snprintf(ompPath, sizeof ompPath, "%s/.bun/bin/omp", h ? h : "");
-    if (access(ompPath, X_OK) != 0) {
-      const char *path = getenv("PATH");
-      char buf[4096]; snprintf(buf, sizeof buf, "%s", path ? path : "");
-      ompPath[0] = '-';
-      for (char *save, *d = strtok_r(buf, ":", &save); d; d = strtok_r(NULL, ":", &save)) {
-        char c[600]; snprintf(c, sizeof c, "%s/omp", d);
-        if (access(c, X_OK) == 0) { snprintf(ompPath, sizeof ompPath, "%.511s", c); break; }
-      }
-    }
-  }
+  if (!*ompPath && !plat_find_exe("omp", ompPath, sizeof ompPath)) snprintf(ompPath, sizeof ompPath, "-");
   return ompPath[0] != '-';
+}
+
+static const char *home_dir(void) {
+  const char *h = getenv("HOME");
+  if (!h || !*h) h = getenv("USERPROFILE"); // Windows
+  return h ? h : ".";
 }
 
 static void strip_ansi(char *s) {
@@ -639,8 +600,7 @@ static void norm_url(const char *u, char *out, size_t n) {
 void llm_agent_model(const LlmCfg *c, char *out, size_t n) {
   out[0] = 0;
   if (*c->agentModel) { snprintf(out, n, "%s", c->agentModel); return; }
-  const char *h = getenv("HOME");
-  char p[512]; snprintf(p, sizeof p, "%s/.omp/agent/models.yml", h ? h : ".");
+  char p[512]; snprintf(p, sizeof p, "%s/.omp/agent/models.yml", home_dir());
   FILE *f = fopen(p, "r");
   if (!f) return;
   char line[1024], prov[128] = "", base[512] = "", want[512], any[256] = "";
@@ -677,11 +637,10 @@ static Reply run_agent(const LlmCfg *c, const char *system, const char *prompt, 
   if (*model) { argv[a++] = "--model"; argv[a++] = model; }
   if (system && *system) { argv[a++] = "--append-system-prompt"; argv[a++] = (char *)system; }
   argv[a++] = (char *)prompt; argv[a] = NULL;
-  struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+  double t0 = plat_now();
   int st;
   char *out = run_capture(ompPath, ompPath, argv, NULL, &st);
-  struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-  r.secs = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  r.secs = plat_now() - t0;
   if (out) {
     strip_ansi(out); strip_thinking(out);
     if (!strncmp(out, "Working...", 10)) { memmove(out, out + 10, strlen(out + 10) + 1); strip_thinking(out); } // progress line
@@ -737,7 +696,7 @@ static void history_append(const char *role, const char *text) {
   char p[512]; path_of("chat-history.jsonl", p, sizeof p);
   FILE *f = fopen(p, "a");
   if (!f) return;
-  chmod(p, 0600);
+  plat_private_file(p);
   Buf b = {0};
   bfmt(&b, "{\"t\":%ld,\"s\":%ld,\"r\":", (long)time(NULL), sessionId); bjson(&b, role);
   bstr(&b, ",\"c\":"); bjson(&b, text); bstr(&b, "}\n");
@@ -903,10 +862,9 @@ static void *worker(void *arg) {
       searchState = TEST_RUNNING;
       pthread_mutex_unlock(&mx);
       Hit hits[6]; char err[200];
-      struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+      double t0 = plat_now();
       int n = web_search(&c, "Bun JavaScript runtime", hits, 6, err, sizeof err);
-      struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-      double secs = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+      double secs = plat_now() - t0;
       pthread_mutex_lock(&mx);
       if (n > 0) { searchState = TEST_OK; snprintf(searchMsg, sizeof searchMsg, "OK · %d results · %.1f s · e.g. %.60s", n, secs, hits[0].title); }
       else { searchState = TEST_FAIL; snprintf(searchMsg, sizeof searchMsg, "%s", err); }
@@ -1014,15 +972,7 @@ int llm_agent_state(char *msg, size_t n) {
   pthread_mutex_unlock(&mx);
   return s;
 }
-int llm_curl_available(void) {
-  const char *path = getenv("PATH");
-  char buf[4096]; snprintf(buf, sizeof buf, "%s", path ? path : "");
-  for (char *save, *d = strtok_r(buf, ":", &save); d; d = strtok_r(NULL, ":", &save)) {
-    char c[600]; snprintf(c, sizeof c, "%s/curl", d);
-    if (access(c, X_OK) == 0) return 1;
-  }
-  return 0;
-}
+int llm_curl_available(void) { char p[512]; return plat_find_exe("curl", p, sizeof p); }
 void llm_jev_test(void) {
   pthread_mutex_lock(&mx); jevState = TEST_RUNNING; snprintf(jevMsg, sizeof jevMsg, "Asking jev…"); pthread_mutex_unlock(&mx);
   kick(JOB_JEV);
@@ -1111,5 +1061,5 @@ int llm_history(LlmHist *out, int max) {
 }
 void llm_history_delete(void) {
   char p[512]; path_of("chat-history.jsonl", p, sizeof p);
-  unlink(p);
+  remove(p);
 }
