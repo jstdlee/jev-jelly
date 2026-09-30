@@ -109,17 +109,16 @@ jobs:
           Copy-Item mesa\x\x64\*.dll smoke\
           $env:JELLY_SMOKE = '10'; $env:JELLY_SMOKE_OUT = "$PWD\smoke.txt"
           $env:JELLY_OPEN_EVENTS = '1'; $env:JELLY_OPT_SERVICES = '1'; $env:JELLY_OPT_TABS = 'Jelly'
+          # the app saves its own surfaces (with transparency) after 5 s: this also checks the GL readback
+          New-Item -ItemType Directory shots | Out-Null
+          $env:JELLY_SHOT_DIR = "$PWD\shots"; $env:JELLY_SHOT_AT = '5'
           $p = Start-Process -FilePath smoke\jelly.exe -PassThru
-          Start-Sleep -Seconds 7
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size, [System.Drawing.CopyPixelOperation]::SourceCopy -bor [System.Drawing.CopyPixelOperation]::CaptureBlt)
-          $bmp.Save("$PWD\screenshot-windows.png", [System.Drawing.Imaging.ImageFormat]::Png)
           $p | Wait-Process -Timeout 60
           Get-Content smoke.txt
           if (-not (Select-String -Path smoke.txt -Pattern 'frames=')) { exit 1 }
+          Get-ChildItem shots
+          if (-not (Test-Path shots\jelly.png)) { exit 1 }
+          Get-ChildItem shots\*.png | ForEach-Object { Copy-Item $_.FullName ("screenshot-windows-" + $_.Name) }
       - name: Package
         shell: pwsh
         run: |
@@ -127,7 +126,7 @@ jobs:
           New-Item -ItemType Directory "dist\$name" | Out-Null
           Copy-Item jelly.exe, README.md, scripts\install-desktop.ps1 "dist\$name\"
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
-          Move-Item screenshot-windows.png dist\
+          Move-Item screenshot-windows-*.png dist\
       - uses: actions/upload-artifact@v4
         with:
           name: jev-jelly-windows-x86_64
