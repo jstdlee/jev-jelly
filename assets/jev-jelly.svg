@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="body" cx="42%" cy="34%" r="75%">
+      <stop offset="0" stop-color="#b8ffe4"/>
+      <stop offset="0.45" stop-color="#5ee8b7"/>
+      <stop offset="1" stop-color="#1fb58a"/>
+    </radialGradient>
+    <radialGradient id="shadow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#0b3b2e" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#0b3b2e" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cheek" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ff7fa8" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#ff7fa8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="cherry" cx="35%" cy="30%" r="70%">
+      <stop offset="0" stop-color="#ff9fb5"/>
+      <stop offset="1" stop-color="#e0245e"/>
+    </radialGradient>
+  </defs>
+  <!-- soft floor shadow -->
+  <ellipse cx="128" cy="222" rx="92" ry="14" fill="url(#shadow)"/>
+  <!-- the jelly: a squishy dome with a slightly wobbly foot -->
+  <path d="M28 196 C22 120 62 58 128 58 C194 58 234 120 228 196 C228 214 206 220 184 216 C160 222 150 214 128 218 C104 222 92 214 70 218 C48 222 28 214 28 196 Z"
+        fill="url(#body)" stroke="#16a07a" stroke-width="3"/>
+  <!-- glossy cap and shine -->
+  <path d="M62 112 C72 82 100 70 128 70 C160 70 184 84 192 106 C170 96 90 94 62 112 Z" fill="url(#gloss)"/>
+  <ellipse cx="78" cy="112" rx="11" ry="16" transform="rotate(28 78 112)" fill="#fff" opacity="0.9"/>
+  <circle cx="97" cy="92" r="5" fill="#fff" opacity="0.85"/>
+  <!-- little cherry on top -->
+  <path d="M146 60 C150 44 158 34 170 28" stroke="#3f8f3a" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M168 30 C178 22 190 24 194 30 C184 36 176 36 168 30 Z" fill="#5cc452"/>
+  <circle cx="140" cy="58" r="15" fill="url(#cherry)"/>
+  <circle cx="135" cy="53" r="4" fill="#fff" opacity="0.8"/>
+  <!-- face -->
+  <ellipse cx="98" cy="152" rx="11" ry="14" fill="#1b2a33"/>
+  <ellipse cx="158" cy="152" rx="11" ry="14" fill="#1b2a33"/>
+  <circle cx="102" cy="146" r="4.5" fill="#fff"/>
+  <circle cx="162" cy="146" r="4.5" fill="#fff"/>
+  <circle cx="95" cy="157" r="2" fill="#fff" opacity="0.8"/>
+  <circle cx="155" cy="157" r="2" fill="#fff" opacity="0.8"/>
+  <ellipse cx="76" cy="176" rx="18" ry="11" fill="url(#cheek)"/>
+  <ellipse cx="180" cy="176" rx="18" ry="11" fill="url(#cheek)"/>
+  <path d="M118 172 Q123 180 128 172 Q133 180 138 172" stroke="#1b2a33" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

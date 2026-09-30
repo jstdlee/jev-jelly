@@ -8,14 +8,14 @@ LDFLAGS ?= -static-libstdc++ -static-libgcc
 IMGUI = third_party/cimgui
 SYSINC = $(if $(wildcard third_party/sysroot/usr/include),-Ithird_party/sysroot/usr/include)
 INC = $(SYSINC) -I$(IMGUI) -I$(IMGUI)/imgui
-LIBS = $(if $(wildcard third_party/lib),-Lthird_party/lib) -lX11 -lXext -lGL -lm -ldl
+LIBS = $(if $(wildcard third_party/lib),-Lthird_party/lib) -lX11 -lXext -lGL -lm -ldl -lpthread
 
 IMGUI_SRC = $(IMGUI)/cimgui.cpp $(IMGUI)/imgui/imgui.cpp $(IMGUI)/imgui/imgui_draw.cpp $(IMGUI)/imgui/imgui_demo.cpp \
             $(IMGUI)/imgui/imgui_tables.cpp $(IMGUI)/imgui/imgui_widgets.cpp $(IMGUI)/imgui/backends/imgui_impl_opengl3.cpp
 IMGUI_OBJ = $(patsubst %.cpp,build/%.o,$(notdir $(IMGUI_SRC)))
 vpath %.cpp $(IMGUI) $(IMGUI)/imgui $(IMGUI)/imgui/backends
 
-jelly: build/jelly.o build/options.o build/libcimgui.a
+jelly: build/jelly.o build/options.o build/bubble.o build/calendar.o build/kbd.o build/llm.o build/chat.o build/theme.o build/libcimgui.a
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 build/%.o: src/%.c src/jelly.h | build

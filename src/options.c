@@ -1,5 +1,6 @@
 // Right-click options panel: a borderless ARGB window next to the jelly, drawn with cimgui + the OpenGL3 backend.
 // Mouse input comes straight from X events; there's no keyboard because every control works by mouse.
+// Drag either panel by its header to move it. The events pane opens beside the settings.
 
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include "cimgui.h"
@@ -11,18 +12,64 @@
 #include <GL/gl.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define W 340        // settings panel width
+#define EW 470       // events pane width
+#define GAP 10
+#define CW (W + GAP + EW) // canvas: both panels; everything outside them is transparent and click-through
+#define H 980
+#define EH 720       // events pane height
+#define HEADER 40    // drag handle height
 
 static Display *dpy;
 static GLXFBConfig fbc;
 static Window win;
 static GLXContext ctx;
 static ImGuiContext *ig;
-static int open_, W = 340, H = 760, panelH = 640; // fixed canvas; clicks limited to the panel via XShape
-static int wantClose;
+static int open_, panelH = 800, wantClose, wantPreview, showWheel, showEvents, showHistory, showServices, shapeDirty = 1;
+static Kbd okb;
+static const Theme *styled; // the theme the ImGui style was built for          // keyboard for the text fields (endpoint, key, prompt)
+static double deleteArmed; // "Delete history" needs a second click
+static int winX, winY;                                // where the canvas is on screen
+static int dragging, dragRX, dragRY, dragWX, dragWY;  // moving the panel by its header
+static double evAt = -1; // when the events list was last copied
+#define SIDE (showEvents || showHistory || showServices) // the pane beside the settings is open
+static void side_off(void) { showEvents = showHistory = showServices = 0; shapeDirty = 1; }
+static char calNote[160];
+static double calNoteAt;
 
+#define TH theme()
+#define ACCENT RGB(TH->accent, 1)
+#define C_TEXT(a) U32(TH->text, a)
+#define C_MUTED(a) U32(TH->muted, a)
+#define C_ACC(a) U32(TH->accent, a)
 static const char *FLEX_NAMES[] = {"Firm", "Bouncy", "Jiggly", "Wobbly", "Gooey"};
 static const char *PULL_NAMES[] = {"Pinch", "Small", "Half body", "Big", "Most"};
-static int showWheel;
+static const unsigned CAL_COLORS[CAL_MAX_URLS] = {0x2f81f7, 0x3fb950, 0xd29922, 0xf778ba, 0xa371f7,
+                                                  0xdb6d28, 0x39c5cf, 0xf85149, 0x8b949e, 0x56d364};
+
+/* the clipboard arrives asynchronously as a SelectionNotify on our window */
+static void request_clipboard(void) {
+  XConvertSelection(dpy, XInternAtom(dpy, "CLIPBOARD", False), XInternAtom(dpy, "UTF8_STRING", False),
+                    XInternAtom(dpy, "JELLY_CLIP", False), win, CurrentTime);
+  XFlush(dpy);
+}
+static void got_clipboard(XSelectionEvent *se) {
+  snprintf(calNote, sizeof calNote, "The clipboard has no calendar link");
+  if (se->property != None) {
+    Atom type; int fmt; unsigned long n, left; unsigned char *data = NULL;
+    if (XGetWindowProperty(dpy, win, se->property, 0, 4096, True, AnyPropertyType, &type, &fmt, &n, &left, &data) == Success && data) {
+      if (cal_add_url((const char *)data)) snprintf(calNote, sizeof calNote, "Added — reading it now…");
+      else if (!strncmp((const char *)data, "http", 4) || !strncmp((const char *)data, "webcal", 6))
+        snprintf(calNote, sizeof calNote, "Already added (or %d calendars max)", CAL_MAX_URLS);
+      XFree(data);
+    }
+  }
+  calNoteAt = 0;
+}
 
 static ImVec4_c RGB(unsigned hex, float a) {
   return (ImVec4_c){((hex >> 16) & 255) / 255.f, ((hex >> 8) & 255) / 255.f, (hex & 255) / 255.f, a};
@@ -42,24 +89,20 @@ static int segmented(const char *id, const char **items, int n, int *val, float 
   int changed = 0;
   ImDrawList *dl = igGetWindowDrawList();
   ImVec2_c p = igGetCursorScreenPos();
-  float h = 32, pad = 3, w = (width - pad * 2) / n;
-  ImDrawList_AddRectFilled(dl, p, (ImVec2_c){p.x + width, p.y + h}, U32(0x0d1117, 1), 6, 0);
-  ImDrawList_AddRect(dl, p, (ImVec2_c){p.x + width, p.y + h}, U32(0x30363d, 1), 6, 1, 0);
+  float h = 36, pad = 4, w = (width - pad * 2) / n;
+  ImDrawList_AddRectFilled(dl, p, (ImVec2_c){p.x + width, p.y + h}, U32(TH->frame, TH->frameAlpha), h * 0.42f, 0);
   igPushID_Str(id);
   for (int i = 0; i < n; i++) {
     ImVec2_c a = {p.x + pad + w * i, p.y + pad}, b = {a.x + w, p.y + h - pad};
     igSetCursorScreenPos(a);
     igPushID_Int(i);
     if (igInvisibleButton("##seg", (ImVec2_c){w, h - pad * 2}, 0) && *val != i) { *val = i; changed = 1; }
-    int hov = igIsItemHovered(0);
+    int hov = igIsItemHovered(0), act = igIsItemActive();
+    if (*val == i || hov || act) th_jelly_item(dl, a.x + 1, a.y, b.x - 1, b.y, *val == i ? TH_BTN_ON : TH_BTN_QUIET);
     igPopID();
-    if (*val == i) {
-      ImDrawList_AddRectFilled(dl, a, b, U32(0x30363d, 1), 5, 0);
-      ImDrawList_AddRect(dl, a, b, U32(0x484f58, 1), 5, 1, 0);
-    } else if (hov) ImDrawList_AddRectFilled(dl, a, b, U32(0x21262d, 1), 5, 0);
     ImVec2_c ts = igCalcTextSize(items[i], NULL, false, -1);
     ImDrawList_AddText_Vec2(dl, (ImVec2_c){a.x + (w - ts.x) / 2, a.y + (h - pad * 2 - ts.y) / 2},
-                            *val == i ? U32(0xe6edf3, 1) : U32(0x7d8590, 1), items[i], NULL);
+                            *val == i ? (TH->light ? C_TEXT(1) : U32(0xffffff, 1)) : C_MUTED(1), items[i], NULL);
   }
   igPopID();
   igSetCursorScreenPos((ImVec2_c){p.x, p.y + h});
@@ -67,7 +110,7 @@ static int segmented(const char *id, const char **items, int n, int *val, float 
   return changed;
 }
 
-void opt_init(Display *d, GLXFBConfig fb) { dpy = d; fbc = fb; }
+void opt_init(Display *d, GLXFBConfig fb, GLXContext shared) { dpy = d; fbc = fb; ctx = shared; }
 int opt_is_open(void) { return open_; }
 int opt_owns(Window w) { return open_ && w == win; }
 
@@ -76,27 +119,22 @@ static void create(int x, int y) {
   Window root = DefaultRootWindow(dpy);
   XSetWindowAttributes swa = {0};
   swa.colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
-  swa.override_redirect = True;
-  swa.event_mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask | LeaveWindowMask | ExposureMask;
-  win = XCreateWindow(dpy, root, x, y, W, H, 0, vi->depth, InputOutput, vi->visual,
+  swa.override_redirect = False; // managed (see kb_prepare_window) so it can take the keyboard
+  swa.event_mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask | LeaveWindowMask | ExposureMask |
+                   KeyPressMask | KeyReleaseMask | FocusChangeMask;
+  win = XCreateWindow(dpy, root, x, y, CW, H, 0, vi->depth, InputOutput, vi->visual,
                       CWColormap | CWBorderPixel | CWBackPixel | CWOverrideRedirect | CWEventMask, &swa);
+  kb_prepare_window(win);
   XStoreName(dpy, win, "jelly options");
   XFree(vi);
+  kb_attach(&okb, win);
 
-  typedef GLXContext (*CtxFn)(Display *, GLXFBConfig, GLXContext, Bool, const int *);
-  CtxFn mk = (CtxFn)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
-  int cattr[] = {GLX_CONTEXT_MAJOR_VERSION_ARB, 3, GLX_CONTEXT_MINOR_VERSION_ARB, 3, GLX_CONTEXT_PROFILE_MASK_ARB,
-                 GLX_CONTEXT_CORE_PROFILE_BIT_ARB, None};
-  if (mk) ctx = mk(dpy, fbc, NULL, True, cattr);
-  if (!ctx) ctx = glXCreateNewContext(dpy, fbc, GLX_RGBA_TYPE, NULL, True);
+  // drawn with the jelly's own GL context (same visual): no new context is ever created
   XMapRaised(dpy, win);
 
+  // GL objects belong to the (shared) context, so they're created while the jelly's window stays current
   GLXContext prevCtx = glXGetCurrentContext();
   GLXDrawable prevDraw = glXGetCurrentDrawable();
-  glXMakeCurrent(dpy, win, ctx);
-  typedef void (*SwapFn)(Display *, GLXDrawable, int);
-  SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
-  if (si) si(dpy, win, 0); // the jelly's swap already paces the loop
 
   ig = igCreateContext(NULL);
   igSetCurrentContext(ig);
@@ -104,62 +142,88 @@ static void create(int x, int y) {
   io->IniFilename = NULL;
   const char *fonts[] = {"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
-  for (int i = 0; i < 2; i++) {
-    FILE *f = fopen(fonts[i], "rb");
-    if (f) { fclose(f); ImFontAtlas_AddFontFromFileTTF(io->Fonts, fonts[i], 17.0f, NULL, NULL); break; }
+  for (int i = 0; i < 2; i++)
+    if (access(fonts[i], R_OK) == 0) { ImFontAtlas_AddFontFromFileTTF(io->Fonts, fonts[i], 17.0f, NULL, NULL); break; }
+  // Japanese / Chinese / Korean event titles: merge Noto Sans CJK in (glyphs load on demand)
+  const char *cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+  if (access(cjk, R_OK) == 0) {
+    ImFontConfig *fc = ImFontConfig_ImFontConfig();
+    fc->MergeMode = true;
+    ImFontAtlas_AddFontFromFileTTF(io->Fonts, cjk, 17.0f, fc, NULL);
+    ImFontConfig_destroy(fc);
   }
-  ImGuiStyle *s = igGetStyle();
-  igStyleColorsDark(s);
-  // GitHub Primer (dark) palette
-  s->WindowRounding = 12; s->FrameRounding = 6; s->GrabRounding = 6; s->PopupRounding = 6; s->ChildRounding = 6;
-  s->WindowPadding = (ImVec2_c){16, 14}; s->FramePadding = (ImVec2_c){10, 6}; s->ItemSpacing = (ImVec2_c){8, 8};
-  s->WindowBorderSize = 1; s->FrameBorderSize = 1; s->GrabMinSize = 14;
-  ImVec4_c *c = s->Colors;
-  c[ImGuiCol_WindowBg] = RGB(0x161b22, 0.98f);
-  c[ImGuiCol_Border] = RGB(0x30363d, 1);
-  c[ImGuiCol_Text] = RGB(0xe6edf3, 1);
-  c[ImGuiCol_TextDisabled] = RGB(0x7d8590, 1);
-  c[ImGuiCol_FrameBg] = RGB(0x0d1117, 1);
-  c[ImGuiCol_FrameBgHovered] = RGB(0x0d1117, 1);
-  c[ImGuiCol_FrameBgActive] = RGB(0x0d1117, 1);
-  c[ImGuiCol_Button] = RGB(0x21262d, 1);
-  c[ImGuiCol_ButtonHovered] = RGB(0x30363d, 1);
-  c[ImGuiCol_ButtonActive] = RGB(0x282e33, 1);
-  c[ImGuiCol_SliderGrab] = RGB(0x2f81f7, 1);
-  c[ImGuiCol_SliderGrabActive] = RGB(0x58a6ff, 1);
-  c[ImGuiCol_Separator] = RGB(0x21262d, 1);
-  c[ImGuiCol_PopupBg] = RGB(0x161b22, 1);
+  theme_style(igGetStyle(), 0); styled = theme();
   ImGui_ImplOpenGL3_Init("#version 330 core");
   glXMakeCurrent(dpy, prevDraw, prevCtx);
 }
 
-void opt_open(int x, int y) {
+static void clamp_to_screen(void) {
   int sw = DisplayWidth(dpy, DefaultScreen(dpy)), sh = DisplayHeight(dpy, DefaultScreen(dpy));
-  if (x + W > sw) x = sw - W - 8;
-  if (y + panelH > sh) y = sh - panelH - 8;
-  if (x < 8) x = 8;
-  if (y < 8) y = 8;
-  if (!win) create(x, y);
-  else { XMoveWindow(dpy, win, x, y); XMapRaised(dpy, win); }
-  open_ = 1; wantClose = 0;
+  int wide = SIDE ? CW : W;
+  if (winX + wide > sw) winX = sw - wide - 8;
+  if (winY + panelH > sh) winY = sh - panelH - 8;
+  if (winX < 8) winX = 8;
+  if (winY < 8) winY = 8;
 }
+
+void opt_open(int x, int y) {
+  winX = x; winY = y;
+  clamp_to_screen();
+  if (!win) create(winX, winY);
+  else { // the window manager forgets "always on top" when a window is hidden: set it again, then raise
+    kb_prepare_window(win);
+    XMoveWindow(dpy, win, winX, winY);
+    XMapRaised(dpy, win);
+    XSync(dpy, False);
+    XMoveWindow(dpy, win, winX, winY);
+  }
+  XRaiseWindow(dpy, win);
+  kb_grab_soon(&okb, 0); // activate it, so it comes up above whatever window has the focus
+  open_ = 1; wantClose = 0; shapeDirty = 1;
+}
+
+void opt_show_events(int on) { side_off(); showEvents = on; evAt = -1; }
 
 void opt_close(void) {
   if (!open_) return;
+  kb_release(&okb);
   XUnmapWindow(dpy, win);
-  open_ = 0;
+  open_ = 0; dragging = 0;
+  llm_cfg_save();
+}
+
+/* over a header (a drag handle), away from its close button? */
+static int on_header(int x, int y) {
+  if (y > HEADER) return 0;
+  if (x < W - 84) return 1; // (leaves the Test all icon and × clickable)
+  return SIDE && x > W + GAP && x < CW - 48;
 }
 
 void opt_event(XEvent *e) {
   if (!open_) return;
   igSetCurrentContext(ig);
   ImGuiIO *io = igGetIO_Nil();
+  if (kb_paste_arrived(&okb, e, io, 0)) return;
+  if (kb_event(&okb, e, io)) { if (okb.wantPaste) kb_request_paste(&okb); return; }
   switch (e->type) {
-  case MotionNotify: ImGuiIO_AddMousePosEvent(io, (float)e->xmotion.x, (float)e->xmotion.y); break;
-  case LeaveNotify: ImGuiIO_AddMousePosEvent(io, -3.4e38f, -3.4e38f); break;
+  case MotionNotify:
+    if (dragging) {
+      winX = dragWX + e->xmotion.x_root - dragRX; winY = dragWY + e->xmotion.y_root - dragRY;
+      XMoveWindow(dpy, win, winX, winY);
+      return;
+    }
+    ImGuiIO_AddMousePosEvent(io, (float)e->xmotion.x, (float)e->xmotion.y);
+    break;
+  case LeaveNotify: if (!dragging) ImGuiIO_AddMousePosEvent(io, -3.4e38f, -3.4e38f); break;
+  case SelectionNotify: got_clipboard(&e->xselection); break;
   case ButtonPress:
   case ButtonRelease: {
     int down = e->type == ButtonPress, b = e->xbutton.button;
+    if (b == Button1 && down && on_header(e->xbutton.x, e->xbutton.y)) {
+      dragging = 1; dragRX = e->xbutton.x_root; dragRY = e->xbutton.y_root; dragWX = winX; dragWY = winY;
+      return;
+    }
+    if (b == Button1 && !down && dragging) { dragging = 0; return; }
     ImGuiIO_AddMousePosEvent(io, (float)e->xbutton.x, (float)e->xbutton.y);
     if (b == Button1) ImGuiIO_AddMouseButtonEvent(io, 0, down);
     else if (b == Button3) ImGuiIO_AddMouseButtonEvent(io, 1, down);
@@ -171,7 +235,317 @@ void opt_event(XEvent *e) {
   }
 }
 
+/* debugging aid: JELLY_OPT_TABS="LLM,jev" opens those tabs for the first frames (screenshots without input) */
+static int dbgFrames;
+static int tabflag(const char *name) {
+  const char *want = getenv("JELLY_OPT_TABS");
+  if (!want || dbgFrames > 20) return 0;
+  char list[200]; snprintf(list, sizeof list, ",%s,", want);
+  char key[64]; snprintf(key, sizeof key, ",%s,", name);
+  return strstr(list, key) ? ImGuiTabItemFlags_SetSelected : 0;
+}
+
 static int flex_index(float f) { int i = (int)lroundf(f * 4); return i < 0 ? 0 : i > 4 ? 4 : i; }
+
+/* header icons (× and the Test-all check) share one look: same size, centered on the header line, a themed hover
+   circle. kind 0 = ×, 1 = check; `col` (0 = none) colors the check when it has a status to show. */
+static int icon_button(const char *id, int kind, unsigned col, float pulse) {
+  ImVec2_c p = igGetCursorScreenPos();
+  float h = igGetTextLineHeight() + 4;
+  int hit = igInvisibleButton(id, (ImVec2_c){26, h}, 0), hov = igIsItemHovered(0);
+  ImDrawList *dl = igGetWindowDrawList();
+  float cx = p.x + 13, cy = p.y + h / 2;
+  unsigned c = col ? col : hov ? TH->text : TH->muted;
+  if (hov) ImDrawList_AddCircleFilled(dl, (ImVec2_c){cx, cy}, 12, U32(TH->text, 0.10f), 24);
+  if (kind == 0) {
+    ImDrawList_AddLine(dl, (ImVec2_c){cx - 4.5f, cy - 4.5f}, (ImVec2_c){cx + 4.5f, cy + 4.5f}, U32(c, 1), 1.8f);
+    ImDrawList_AddLine(dl, (ImVec2_c){cx - 4.5f, cy + 4.5f}, (ImVec2_c){cx + 4.5f, cy - 4.5f}, U32(c, 1), 1.8f);
+  } else {
+    float a = pulse > 0 ? 0.45f + 0.55f * pulse : 1;
+    if (col) ImDrawList_AddCircleFilled(dl, (ImVec2_c){cx, cy}, 9, U32(col, 0.18f * a), 20);
+    ImDrawList_AddCircle(dl, (ImVec2_c){cx, cy}, 8.5f, U32(c, a), 20, 1.6f);
+    ImDrawList_PathClear(dl); // a tick
+    ImDrawList_PathLineTo(dl, (ImVec2_c){cx - 4, cy + 0.5f});
+    ImDrawList_PathLineTo(dl, (ImVec2_c){cx - 1, cy + 3.5f});
+    ImDrawList_PathLineTo(dl, (ImVec2_c){cx + 4.5f, cy - 3});
+    ImDrawList_PathStroke(dl, U32(c, a), 1.8f, 0);
+  }
+  return hit;
+}
+static int close_button(float right) { // the × at the right end of a header
+  igSameLine(right, 0);
+  return icon_button("##close", 0, 0, 0);
+}
+
+/* ------------------------------------------------------------------ events pane */
+
+static CalEvent evbuf[800];
+static int nevbuf;
+static char openKey[200]; // the event whose description is unfolded
+
+static void events_pane(double now) {
+  if (now - evAt > 2 || evAt < 0) { nevbuf = cal_events(evbuf, 800); evAt = now; }
+  igSetNextWindowPos((ImVec2_c){W + GAP, 0}, ImGuiCond_Always, (ImVec2_c){0, 0});
+  igSetNextWindowSize((ImVec2_c){EW, EH}, ImGuiCond_Always);
+  igBegin("##events", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  float full = EW - 32;
+  igText("Upcoming");
+  igSameLine(0, 8);
+  igTextDisabled("next 3 months");
+  if (close_button(full - 14)) side_off();
+  igSeparator();
+
+  igBeginChild_Str("##list", (ImVec2_c){0, 0}, 0, 0);
+  time_t t = time(NULL);
+  struct tm today; cal_localtime(t, &today);
+  int lastDay = -1, lastYear = -1, shown = 0, lastAllday = -1;
+  time_t lastStart = 0;
+  ImFont *font = igGetFont();
+  float fs = igGetFontSize();
+  for (int i = 0; i < nevbuf; i++) {
+    CalEvent *e = &evbuf[i];
+    if (e->end <= t && !(e->end == e->start && e->start > t - 3600)) continue; // already over
+    struct tm s; cal_localtime(e->start > t || !e->allday ? e->start : t, &s);
+    if (s.tm_yday != lastDay || s.tm_year != lastYear) { // date header
+      lastDay = s.tm_yday; lastYear = s.tm_year;
+      char d[64]; strftime(d, sizeof d, "%a, %d %b", &s);
+      long days = (long)((s.tm_year - today.tm_year) * 366 + s.tm_yday - today.tm_yday);
+      igDummy((ImVec2_c){0, shown ? 6 : 0});
+      igPushFont(NULL, 14.5f);
+      if (days == 0) igTextColored(ACCENT, "TODAY  ·  %s", d);
+      else if (days == 1) igTextColored(RGB(TH->text, 1), "TOMORROW  ·  %s", d);
+      else igTextColored(RGB(TH->muted, 1), "%s", d);
+      igPopFont();
+    }
+    // events starting together share one row: time and month once, titles stacked under each other
+    int same = shown && e->start == lastStart && e->allday == lastAllday;
+    lastStart = e->start; lastAllday = e->allday;
+    if (same) igSetCursorPosY(igGetCursorPosY() - igGetStyle()->ItemSpacing.y);
+    shown++;
+    char key[200]; snprintf(key, sizeof key, "%.150s@%ld", e->uid, (long)e->start);
+    int open = !strcmp(key, openKey);
+
+    // row: time | colored bar | title + place, all drawn by hand over one selectable
+    char when[32];
+    if (e->allday) snprintf(when, sizeof when, "All day");
+    else strftime(when, sizeof when, "%H:%M", &s);
+    float tx = 70, tw = full - tx - 96; // right side: month label, then the +/− for descriptions
+    ImVec2_c ts = ImFont_CalcTextSizeA(font, fs, 1e9f, tw, e->title, NULL, NULL);
+    float rowH = ts.y + (*e->where ? fs * 0.95f : 0) + 10;
+    ImVec2_c p = igGetCursorScreenPos();
+    igPushID_Int(i);
+    if (igSelectable_Bool("##row", open, 0, (ImVec2_c){0, rowH}))
+      snprintf(openKey, sizeof openKey, "%s", open ? "" : key);
+    igPopID();
+    ImDrawList *dl = igGetWindowDrawList();
+    unsigned col = CAL_COLORS[(unsigned)e->cal % CAL_MAX_URLS];
+    if (!same) ImDrawList_AddText_FontPtr(dl, font, fs * 0.92f, (ImVec2_c){p.x + 4, p.y + 5}, C_MUTED(1), when, NULL, 0, NULL);
+    ImDrawList_AddRectFilled(dl, (ImVec2_c){p.x + tx - 10, p.y + 5}, (ImVec2_c){p.x + tx - 7, p.y + rowH - 5}, U32(col, 1), 2, 0);
+    ImDrawList_AddText_FontPtr(dl, font, fs, (ImVec2_c){p.x + tx, p.y + 4}, C_TEXT(1), e->title, NULL, tw, NULL);
+    if (*e->where)
+      ImDrawList_AddText_FontPtr(dl, font, fs * 0.85f, (ImVec2_c){p.x + tx, p.y + 4 + ts.y + 1}, C_MUTED(1), e->where, NULL, tw, NULL);
+    char mon[16]; strftime(mon, sizeof mon, "%b %e", &s); // month label, e.g. "Oct  2"
+    { char *d = mon, *o = mon; for (; *d; d++) if (!(*d == ' ' && d[1] == ' ')) *o++ = *d; *o = 0; }
+    ImVec2_c ms = ImFont_CalcTextSizeA(font, fs * 0.85f, 1e9f, 0, mon, NULL, NULL);
+    if (!same) ImDrawList_AddText_FontPtr(dl, font, fs * 0.85f, (ImVec2_c){p.x + full - 34 - ms.x, p.y + 6}, C_MUTED(1), mon, NULL, 0, NULL);
+    if (*e->desc) ImDrawList_AddText_FontPtr(dl, font, fs, (ImVec2_c){p.x + full - 24, p.y + 4}, C_MUTED(1), open ? "−" : "+", NULL, 0, NULL);
+    if (open) {
+      igIndent(tx);
+      igPushTextWrapPos(full - 8);
+      if (*e->desc) igTextColored(RGB(TH->text, 0.85f), "%s", e->desc);
+      else igTextDisabled("No description");
+      char range[96], a[16], b[16];
+      struct tm en; cal_localtime(e->end, &en);
+      strftime(a, sizeof a, "%H:%M", &s); strftime(b, sizeof b, "%H:%M", &en);
+      if (!e->allday) { snprintf(range, sizeof range, "%s – %s  ·  %ld min", a, b, (long)(e->end - e->start) / 60); igTextDisabled("%s", range); }
+      igPopTextWrapPos();
+      igUnindent(tx);
+      igDummy((ImVec2_c){0, 4});
+    }
+  }
+  if (!shown) {
+    igDummy((ImVec2_c){0, 20});
+    igTextDisabled(cal_count() ? "Nothing on your calendars in the next 3 months." : "No calendars yet — use Paste link.");
+  }
+  igEndChild();
+  igEnd();
+}
+
+/* ------------------------------------------------------------------ chat history pane */
+
+static LlmHist hist[400];
+static int nhist;
+static double histAt = -1;
+
+static void history_pane(double now) {
+  if (now - histAt > 3 || histAt < 0) { nhist = llm_history(hist, 400); histAt = now; }
+  igSetNextWindowPos((ImVec2_c){W + GAP, 0}, ImGuiCond_Always, (ImVec2_c){0, 0});
+  igSetNextWindowSize((ImVec2_c){EW, EH}, ImGuiCond_Always);
+  igBegin("##history", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  float full = EW - 32;
+  igText("Chat history");
+  igSameLine(0, 8);
+  igTextDisabled("%d messages%s", nhist, llm_cfg()->saveHistory ? "" : " · saving is off");
+  if (close_button(full - 14)) side_off();
+  igSeparator();
+  igBeginChild_Str("##hist", (ImVec2_c){0, 0}, 0, 0);
+  long lastSession = -1;
+  for (int i = nhist - 1; i >= 0; i--) { // newest conversation first, each read top to bottom
+    if (hist[i].session == lastSession) continue;
+    lastSession = hist[i].session;
+    int first = i; while (first > 0 && hist[first - 1].session == lastSession) first--;
+    time_t st = (time_t)(hist[first].session ? hist[first].session : hist[first].t);
+    struct tm lt; cal_localtime(st, &lt);
+    char d[64]; strftime(d, sizeof d, "%a, %d %b %Y  %H:%M", &lt);
+    igDummy((ImVec2_c){0, 4});
+    igPushFont(NULL, 14.5f); igTextColored(RGB(TH->muted, 1), "%s", d); igPopFont();
+    for (int j = first; j <= i; j++) {
+      igTextColored(hist[j].user ? RGB(TH->muted, 1) : ACCENT, "%s", hist[j].user ? "You" : "Jelly");
+      igSameLine(56, 0);
+      igPushTextWrapPos(full - 8);
+      igTextUnformatted(hist[j].text, NULL);
+      igPopTextWrapPos();
+    }
+    igSeparator();
+  }
+  if (!nhist) { igDummy((ImVec2_c){0, 20}); igTextDisabled("No saved chats."); }
+  igEndChild();
+  igEnd();
+}
+
+static void status_dot(int state, double t) {
+  ImDrawList *dl = igGetWindowDrawList();
+  ImVec2_c p = igGetCursorScreenPos();
+  unsigned c = state == TEST_OK ? TH->accent : state == TEST_FAIL ? TH->danger : state == TEST_RUNNING ? TH->warn : TH->muted;
+  float a = state == TEST_RUNNING ? 0.55f + 0.45f * sinf((float)t * 8) : 1;
+  ImDrawList_AddCircleFilled(dl, (ImVec2_c){p.x + 6, p.y + 10}, 5.5f, U32(c, a), 16);
+  igDummy((ImVec2_c){16, 0});
+  igSameLine(0, 4);
+}
+
+/* ------------------------------------------------------------------ services pane ("Test all") */
+
+enum { SV_GRAY, SV_YELLOW, SV_GREEN };
+static void service_row(const char *name, const char *usedFor, int level, int busy, const char *detail, double t) {
+  float full = EW - 32;
+  ImDrawList *dl = igGetWindowDrawList();
+  ImVec2_c p = igGetCursorScreenPos();
+  unsigned col = level == SV_GREEN ? 0x3fb950 : level == SV_YELLOW ? 0xd29922 : 0x8b949e;
+  float a = busy ? 0.45f + 0.55f * (0.5f + 0.5f * sinf((float)t * 8)) : 1;
+  ImDrawList_AddCircleFilled(dl, (ImVec2_c){p.x + 8, p.y + 11}, 6.5f, U32(col, a), 20);
+  if (level == SV_GREEN && !busy) ImDrawList_AddCircle(dl, (ImVec2_c){p.x + 8, p.y + 11}, 9.5f, U32(col, 0.35f), 20, 1.5f);
+  igSetCursorScreenPos((ImVec2_c){p.x + 24, p.y});
+  igText("%s", name);
+  igSameLine(0, 8);
+  igTextDisabled("%s", usedFor);
+  igSetCursorScreenPos((ImVec2_c){p.x + 24, igGetCursorScreenPos().y});
+  igPushTextWrapPos(full);
+  igPushFont(NULL, 14.5f);
+  if (level == SV_YELLOW && !busy) igTextColored(RGB(TH->warn, 1), "%s", detail); else igTextDisabled("%s", detail);
+  igPopFont();
+  igPopTextWrapPos();
+  igDummy((ImVec2_c){0, 6});
+}
+static int level_of(int testState) { return testState == TEST_OK ? SV_GREEN : testState == TEST_NONE ? SV_GRAY : SV_YELLOW; }
+
+/* all the services that are switched on: TEST_RUNNING while any test runs, TEST_FAIL if any failed, TEST_OK if
+   they all passed, TEST_NONE before the first test */
+static int services_overall(void) {
+  LlmCfg *lc = llm_cfg();
+  char m[600];
+  int st[5], n = 0, any = 0, fail = 0, run = 0;
+  if (*lc->base) st[n++] = llm_test_state(m, sizeof m);
+  if (lc->actionOn) st[n++] = llm_router_state(m, sizeof m);
+  if (lc->routerOn) st[n++] = llm_jev_state(m, sizeof m);
+  if (lc->wsProvider != WS_NONE) st[n++] = llm_search_state(m, sizeof m);
+  if (llm_agent_available()) st[n++] = llm_agent_state(m, sizeof m);
+  for (int i = 0; i < n; i++) { run |= st[i] == TEST_RUNNING; fail |= st[i] == TEST_FAIL; any |= st[i] != TEST_NONE; }
+  return run ? TEST_RUNNING : fail ? TEST_FAIL : any ? TEST_OK : TEST_NONE;
+}
+
+static void test_all(void) {
+  LlmCfg *lc = llm_cfg();
+  llm_cfg_save();
+  if (*lc->base) llm_test();
+  llm_router_test();
+  if (lc->routerOn) llm_jev_test();
+  if (lc->wsProvider != WS_NONE && *lc->wsKey) llm_search_test();
+  if (llm_agent_available()) llm_agent_test();
+  if (cal_count()) cal_refresh();
+}
+
+static void services_pane(double now) {
+  igSetNextWindowPos((ImVec2_c){W + GAP, 0}, ImGuiCond_Always, (ImVec2_c){0, 0});
+  igSetNextWindowSize((ImVec2_c){EW, EH}, ImGuiCond_Always);
+  igBegin("##services", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  float full = EW - 32;
+  igText("Services");
+  igSameLine(0, 8);
+  igTextDisabled("what the settings depend on");
+  if (close_button(full - 14)) side_off();
+  igSeparator();
+  { // legend
+    ImDrawList *dl = igGetWindowDrawList();
+    const char *names[] = {"working", "needs attention", "off / not installed"};
+    unsigned cols[] = {0x3fb950, 0xd29922, 0x8b949e};
+    for (int i = 0; i < 3; i++) {
+      ImVec2_c p = igGetCursorScreenPos();
+      ImDrawList_AddCircleFilled(dl, (ImVec2_c){p.x + 5, p.y + 9}, 4.5f, U32(cols[i], 1), 12);
+      igSetCursorScreenPos((ImVec2_c){p.x + 14, p.y});
+      igPushFont(NULL, 14.5f); igTextDisabled("%s", names[i]); igPopFont();
+      if (i < 2) igSameLine(0, 14);
+    }
+  }
+  igDummy((ImVec2_c){0, 4});
+  igBeginChild_Str("##svc", (ImVec2_c){0, 0}, 0, 0);
+  LlmCfg *lc = llm_cfg();
+  char m[600]; int st;
+
+  label("CHAT");
+  st = llm_test_state(m, sizeof m);
+  service_row("Chat model", lc->model, *lc->base ? level_of(st) : SV_GRAY, st == TEST_RUNNING, *lc->base ? m : "No endpoint set (LLM > Model)", now);
+  st = llm_router_state(m, sizeof m);
+  { char first[600]; snprintf(first, sizeof first, "%s", st == TEST_NONE && !*m ? "Not tested yet" : m);
+    char *nl = strchr(first, '\n'); if (nl) *nl = 0; // just the first result line
+    service_row("Router model", "picks the route", !lc->actionOn ? SV_GRAY : level_of(st), st == TEST_RUNNING,
+                !lc->actionOn ? "Off: cues, jev and message length route alone" : first, now); }
+  st = llm_jev_state(m, sizeof m);
+  { char first[600]; snprintf(first, sizeof first, "%s", m);
+    char *nl = strchr(first, '\n'); if (nl) *nl = 0;
+    service_row("jev", "SystemOne · router fallback", !lc->routerOn ? SV_GRAY : level_of(st), st == TEST_RUNNING, first, now); }
+  st = llm_search_state(m, sizeof m);
+  service_row("Web search API", lc->wsProvider == WS_BRAVE ? "Brave" : lc->wsProvider == WS_EXA ? "Exa" : lc->wsProvider == WS_TAVILY ? "Tavily" : "",
+              level_of(st), st == TEST_RUNNING, m, now);
+  st = llm_agent_state(m, sizeof m);
+  service_row("oh-my-pi agent", "omp · research without an API", level_of(st), st == TEST_RUNNING, m, now);
+
+  label("TOOLS");
+  int curl = llm_curl_available();
+  service_row("curl", "all network requests", curl ? SV_GREEN : SV_GRAY, 0, curl ? "Installed" : "Not installed: chat, routing and calendars can't connect", now);
+  int cjk = access("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", R_OK) == 0;
+  service_row("Noto Sans CJK", "Chinese / Japanese / Korean text", cjk ? SV_GREEN : SV_GRAY, 0, cjk ? "Installed" : "Not installed: CJK text shows as boxes (fonts-noto-cjk)", now);
+
+  label("CALENDAR");
+  int nc = cal_count(), bad = 0, off = 0, pend = 0, events = 0;
+  for (int i = 0; i < nc; i++) {
+    CalInfo ci; if (!cal_info(i, &ci)) break;
+    if (!ci.enabled) off++; else if (!ci.fetched) pend++; else if (!ci.ok) bad++; else events += ci.count;
+  }
+  char cm[200];
+  if (!nc) snprintf(cm, sizeof cm, "No calendars yet (Calendar > Paste link)");
+  else snprintf(cm, sizeof cm, "%d calendar%s · %d events%s%s", nc, nc == 1 ? "" : "s", events, bad ? " · some can't be read" : "", off ? " · some switched off" : "");
+  service_row("iCal links", "reminders", !nc ? SV_GRAY : bad ? SV_YELLOW : SV_GREEN, pend > 0, cm, now);
+  igEndChild();
+  igEnd();
+}
+
+/* ------------------------------------------------------------------ settings panel */
 
 int opt_frame(Cfg *c, double dt) {
   if (!open_) return OPT_NONE;
@@ -179,9 +553,17 @@ int opt_frame(Cfg *c, double dt) {
   GLXContext prevCtx = glXGetCurrentContext();
   GLXDrawable prevDraw = glXGetCurrentDrawable();
   glXMakeCurrent(dpy, win, ctx);
+  static int swapSet; // no vsync wait here: the jelly's own swap paces the loop
+  if (!swapSet) {
+    typedef void (*SwapFn)(Display *, GLXDrawable, int);
+    SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
+    if (si) si(dpy, win, 0);
+    swapSet = 1;
+  }
   igSetCurrentContext(ig);
+  if (styled != theme()) { theme_style(igGetStyle(), 0); styled = theme(); }
   ImGuiIO *io = igGetIO_Nil();
-  io->DisplaySize = (ImVec2_c){(float)W, (float)H};
+  io->DisplaySize = (ImVec2_c){(float)CW, (float)H};
   io->DeltaTime = dt > 0 ? (float)dt : 1.0f / 60;
   ImGui_ImplOpenGL3_NewFrame();
   igNewFrame();
@@ -192,18 +574,42 @@ int opt_frame(Cfg *c, double dt) {
                                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
                                ImGuiWindowFlags_NoSavedSettings);
   float full = (float)W - 16 * 2;
-  // header
+  // header (also the drag handle)
   ImDrawList *dl = igGetWindowDrawList();
   ImVec2_c hp = igGetCursorScreenPos();
   ImDrawList_AddCircleFilled(dl, (ImVec2_c){hp.x + 9, hp.y + 11}, 8, U32f(c->col[0], c->col[1], c->col[2]), 24);
   igSetCursorScreenPos((ImVec2_c){hp.x + 24, hp.y});
   igText("Jelly friend");
-  igSameLine(full - 14, 0);
-  igPushStyleColor_Vec4(ImGuiCol_Button, RGB(0x161b22, 0));
-  igPushStyleVar_Float(ImGuiStyleVar_FrameBorderSize, 0);
-  if (igButton("x", (ImVec2_c){26, 0})) wantClose = 1;
-  igPopStyleVar(1); igPopStyleColor(1);
+  igSameLine(0, 8);
+  igTextDisabled("drag here to move");
+  { // "Test all": green = everything checked works, yellow = something needs attention, pulsing = testing
+    igSameLine(full - 40, 0);
+    unsigned col = 0; float pulse = 0;
+    int ov = services_overall();
+    if (ov == TEST_RUNNING) { col = 0xd29922; pulse = 0.5f + 0.5f * sinf((float)igGetTime() * 8); }
+    else if (ov == TEST_OK) col = 0x3fb950;
+    else if (ov == TEST_FAIL) col = 0xd29922;
+    if (icon_button("##testall", 1, col, pulse)) {
+      int on = !showServices; side_off(); showServices = on;
+      if (on) test_all();
+    }
+    if (igIsItemHovered(0))
+      igSetTooltip(ov == TEST_OK ? "Test all: everything works" : ov == TEST_FAIL ? "Test all: something needs attention (click for details)"
+                   : ov == TEST_RUNNING ? "Testing…" : "Test all: check every service and tool the settings depend on");
+  }
+  if (close_button(full - 12)) wantClose = 1;
   igSeparator();
+
+  static double clock_;
+  const char *dbgSv = getenv("JELLY_OPT_SERVICES");
+  if (dbgFrames == 3 && getenv("JELLY_OPT_TABS")) side_off();
+  if (dbgFrames++ == 3 && dbgSv && *dbgSv) { side_off(); showServices = 1; test_all(); }
+  clock_ += dt;
+  if (igBeginTabBar("##tabs", 0)) {
+  if (igBeginTabItem("Jelly", NULL, tabflag("Jelly"))) {
+  label("APP THEME");
+  static const char *TN[] = {"White", "Dark", "Tokyo Night"};
+  if (segmented("theme", TN, 3, &c->theme, full)) { theme_select(c->theme); out |= OPT_CHANGED; }
 
   label("CHARACTER");
   static const char *CH[] = {"Boy", "Girl"};
@@ -242,8 +648,8 @@ int opt_frame(Cfg *c, double dt) {
         if (hov) igSetTooltip("Any color");
         if (clicked) showWheel = !showWheel;
       }
-      if (sel) ImDrawList_AddCircle(dl, ctr, d / 2, U32(0x2f81f7, 1), 32, 2);
-      else if (hov) ImDrawList_AddCircle(dl, ctr, d / 2, U32(0x484f58, 1), 32, 1.5f);
+      if (sel) ImDrawList_AddCircle(dl, ctr, d / 2, C_ACC(1), 32, 2);
+      else if (hov) ImDrawList_AddCircle(dl, ctr, d / 2, C_MUTED(0.6f), 32, 1.5f);
     }
     igSetCursorScreenPos((ImVec2_c){p.x, p.y + d});
     igDummy((ImVec2_c){full, 0});
@@ -258,6 +664,11 @@ int opt_frame(Cfg *c, double dt) {
   }
 
   char fmt[32];
+  label("OPACITY");
+  igSetNextItemWidth(full);
+  float pct = c->opacity * 100;
+  if (igSliderFloat("##opacity", &pct, 20, 100, "%.0f%%", 0)) { c->opacity = pct / 100; out |= OPT_CHANGED; }
+
   label("STRETCH");
   igSetNextItemWidth(full);
   snprintf(fmt, sizeof fmt, "%s", FLEX_NAMES[flex_index(c->flex)]);
@@ -271,36 +682,348 @@ int opt_frame(Cfg *c, double dt) {
   label("SIZE");
   igSetNextItemWidth(full);
   if (igSliderFloat("##size", &c->size, 36, 110, "%.0f px", 0)) out |= OPT_CHANGED;
+  igEndTabItem();
+  }
+
+  if (igBeginTabItem("Calendar", NULL, tabflag("Calendar"))) {
+  label("CALENDARS");
+  {
+    int nc = cal_count();
+    for (int i = 0; i < nc; i++) {
+      CalInfo ci;
+      if (!cal_info(i, &ci)) break;
+      igPushID_Int(100 + i);
+      bool on = ci.enabled;
+      ImVec2_c p = igGetCursorScreenPos();
+      ImDrawList_AddCircleFilled(dl, (ImVec2_c){p.x + 6, p.y + 11}, 5, U32(CAL_COLORS[i], ci.enabled ? 1 : 0.35f), 16);
+      igSetCursorScreenPos((ImVec2_c){p.x + 16, p.y});
+      igPushStyleVar_Vec2(ImGuiStyleVar_FramePadding, (ImVec2_c){3, 3});
+      if (igCheckbox("##on", &on)) cal_set_enabled(i, on);
+      igPopStyleVar(1);
+      if (igIsItemHovered(0)) igSetTooltip(on ? "Switch this calendar off" : "Switch this calendar on");
+      igSameLine(0, 6);
+      char name[48]; snprintf(name, sizeof name, "%.44s", ci.label);
+      if (ci.enabled) igText("%s", name); else igTextDisabled("%s", name);
+      igSameLine(full - 58, 0);
+      if (!ci.enabled) igTextDisabled("off");
+      else if (!ci.fetched) igTextDisabled("…");
+      else if (!ci.ok) igTextColored(RGB(TH->danger, 1), "error");
+      else igTextDisabled("%d", ci.count);
+      igSameLine(full - 10, 0);
+      igPushStyleVar_Float(ImGuiStyleVar_FrameBorderSize, 0);
+      igPushStyleColor_Vec4(ImGuiCol_Button, RGB(0x000000, 0));
+      if (igSmallButton("x")) cal_remove_url(i);
+      igPopStyleColor(1); igPopStyleVar(1);
+      if (igIsItemHovered(0)) igSetTooltip("Remove this calendar");
+      igPopID();
+    }
+    float third = (full - 16) / 3;
+    if (th_button("Paste link", third, 32, TH_BTN)) { request_clipboard(); snprintf(calNote, sizeof calNote, "Reading the clipboard…"); }
+    if (igIsItemHovered(0))
+      igSetTooltip("Copy a calendar's secret iCal link, then click here. Add as many as you like.\n"
+                   "Google Calendar: Settings > your calendar >\nIntegrate calendar > Secret address in iCal format");
+    igSameLine(0, 8);
+    if (th_button("Events", third, 32, showEvents ? TH_BTN_ON : TH_BTN)) { int on = !showEvents; side_off(); showEvents = on; evAt = -1; }
+    if (igIsItemHovered(0)) igSetTooltip("List everything in the next 3 months");
+    igSameLine(0, 8);
+    if (th_button("Preview", third, 32, TH_BTN)) wantPreview = 1;
+    if (igIsItemHovered(0)) igSetTooltip("Show the next event beside the jelly now");
+    char st[160]; cal_status(st, sizeof st);
+    igPushTextWrapPos(full + 16);
+    igTextDisabled("%s", *calNote ? calNote : st);
+    igPopTextWrapPos();
+    if (*calNote && (calNoteAt += dt) > 4) calNote[0] = 0;
+  }
+  igEndTabItem();
+  }
+
+  if (igBeginTabItem("Chat", NULL, tabflag("Chat"))) {
+    LlmCfg *lc = llm_cfg();
+    int dirty = 0;
+    igPushTextWrapPos(full + 16);
+    igTextDisabled("Triple-click the jelly to chat. You can ask more while it's answering: questions queue up and each "
+                   "answer comes back under its question.");
+    int waiting = llm_waiting();
+    if (waiting) igTextColored(ACCENT, waiting == 1 ? "Answering 1 question…" : "Answering %d questions…", waiting);
+    igPopTextWrapPos();
+    label("HISTORY");
+    bool save = lc->saveHistory;
+    if (igCheckbox("Save chat history", &save)) { lc->saveHistory = save; dirty = 1; }
+    if (igIsItemHovered(0)) igSetTooltip("Off: nothing you say is written to disk");
+    float half2 = (full - 8) / 2;
+    if (th_button("History", half2, 32, showHistory ? TH_BTN_ON : TH_BTN)) { int on = !showHistory; side_off(); showHistory = on; histAt = -1; }
+    igSameLine(0, 8);
+    int armed = clock_ - deleteArmed < 3;
+    if (th_button(armed ? "Sure?##del" : "Delete all##del", half2, 32, TH_BTN_DANGER)) {
+      if (armed) { llm_history_delete(); histAt = -1; deleteArmed = 0; } else deleteArmed = clock_;
+    }
+    if (igIsItemHovered(0)) igSetTooltip("Delete all saved chat history (click twice)");
+    igPushTextWrapPos(full + 16);
+    igTextDisabled("Model, prompts, routing and search are in the LLM tab.");
+    igPopTextWrapPos();
+    if (dirty) llm_cfg_save();
+    igEndTabItem();
+  }
+
+  if (igBeginTabItem("LLM", NULL, tabflag("LLM"))) {
+    LlmCfg *lc = llm_cfg();
+    int dirty = 0;
+    if (igBeginTabBar("##llm", 0)) {
+      // --- the chat model: where it is, which one, how it samples
+      if (igBeginTabItem("Model", NULL, tabflag("Model"))) {
+        if (igCollapsingHeader_TreeNodeFlags("Endpoint", ImGuiTreeNodeFlags_DefaultOpen)) {
+          char tm[200]; int ts = llm_test_state(tm, sizeof tm);
+          status_dot(ts, clock_);
+          igPushTextWrapPos(full + 16);
+          if (ts == TEST_FAIL) igTextColored(RGB(TH->danger, 1), "%s", tm); else igTextDisabled("%s", tm);
+          igPopTextWrapPos();
+          label("URL  (OPENAI-COMPATIBLE)");
+          igSetNextItemWidth(full);
+          dirty |= igInputTextWithHint("##base", "http://127.0.0.1:8888/v1", lc->base, sizeof lc->base, 0, NULL, NULL);
+          label("MODEL");
+          static char mlist[64][128]; static int nm, fetched; static double fetchAt;
+          if (!fetched || clock_ - fetchAt > 2) { nm = llm_models(mlist, 64); fetchAt = clock_; }
+          if (!fetched) { llm_fetch_models(); fetched = 1; } // first look at the tab: ask the server what it has
+          igSetNextItemWidth(full - 72);
+          if (nm) {
+            if (igBeginCombo("##models", *lc->model ? lc->model : "choose a model", 0)) {
+              for (int i = 0; i < nm; i++) {
+                bool sel = !strcmp(mlist[i], lc->model);
+                if (igSelectable_Bool(mlist[i], sel, 0, (ImVec2_c){0, 0})) { snprintf(lc->model, sizeof lc->model, "%.127s", mlist[i]); dirty = 1; }
+              }
+              igEndCombo();
+            }
+          } else dirty |= igInputTextWithHint("##model", "model name (list unavailable)", lc->model, sizeof lc->model, 0, NULL, NULL);
+          igSameLine(0, 6);
+          if (th_button("Reload", 66, 0, TH_BTN)) llm_fetch_models();
+          if (igIsItemHovered(0)) igSetTooltip("Reload the model list from %s/models", lc->base);
+          label("API KEY");
+          igSetNextItemWidth(full);
+          dirty |= igInputTextWithHint("##key", "none needed for local servers", lc->key, sizeof lc->key, ImGuiInputTextFlags_Password, NULL, NULL);
+          igDummy((ImVec2_c){0, 2});
+          if (th_button("Test", full, 30, TH_BTN)) { llm_cfg_save(); llm_test(); }
+          if (igIsItemHovered(0)) igSetTooltip("Send a tiny request to check the endpoint, model and key");
+        }
+        if (igCollapsingHeader_TreeNodeFlags("Sampling", ImGuiTreeNodeFlags_DefaultOpen)) {
+          label("TEMPERATURE");
+          igSetNextItemWidth(full);
+          dirty |= igSliderFloat("##temp", &lc->temperature, 0, 1.5f, "%.2f", 0);
+          igPushTextWrapPos(full + 16);
+          igTextDisabled("Reply length and thinking are set per route, in Prompts.");
+          igPopTextWrapPos();
+        }
+        igEndTabItem();
+      }
+
+      // --- the three routes, each with its own prompt
+      if (igBeginTabItem("Prompts", NULL, tabflag("Prompts"))) {
+        static char undo[sizeof lc->route[0].system]; static int hasUndo = -1; static char optNote[200];
+        char better[sizeof lc->route[0].system]; int op = llm_optimize_poll(better, sizeof better);
+        static int optFor = -1;
+        if (op == 1 && *better && optFor >= 0) {
+          snprintf(undo, sizeof undo, "%s", lc->route[optFor].system); hasUndo = optFor;
+          snprintf(lc->route[optFor].system, sizeof lc->route[optFor].system, "%s", better); dirty = 1; optNote[0] = 0;
+        } else if (op == -1) snprintf(optNote, sizeof optNote, "Couldn't improve it: %.150s", better);
+        static const char *RN[NROUTES] = {"Quick", "Think", "Research"};
+        if (igBeginTabBar("##routes", 0)) {
+          for (int r = 0; r < NROUTES; r++) {
+            if (!igBeginTabItem(RN[r], NULL, tabflag(RN[r]))) continue;
+            LlmRoute *rt = &lc->route[r];
+            igPushID_Int(r);
+            label("USED FOR");
+            igSetNextItemWidth(full);
+            dirty |= igInputText("##when", rt->when, sizeof rt->when, 0, NULL, NULL);
+            if (r == ROUTE_RESEARCH) {
+              label("HOW TO RESEARCH");
+              static const char *BN[] = {"Auto", "Agent", "Model only"};
+              if (segmented("rb", BN, 3, &rt->backend, full)) dirty = 1;
+              if (igIsItemHovered(0)) igSetTooltip("Auto: web search + model when it's set up, otherwise the oh-my-pi agent");
+            }
+            bool th = rt->thinking;
+            if (igCheckbox("Let the model think first (slower, deeper)", &th)) { rt->thinking = th; dirty = 1; }
+            label("MAX REPLY LENGTH");
+            igSetNextItemWidth(full);
+            dirty |= igSliderInt("##maxtok", &rt->maxTokens, 64, 16000, "%d tokens", 0);
+            label("PROMPT");
+            dirty |= igInputTextMultiline("##sys", rt->system, sizeof rt->system, (ImVec2_c){full, r == ROUTE_QUICK ? 110 : 190}, ImGuiInputTextFlags_WordWrap, NULL, NULL);
+            igTextDisabled("%d characters%s", (int)strlen(rt->system), r == ROUTE_QUICK ? "  ·  keep Quick short" : "");
+            float third3 = (full - 16) / 3;
+            igBeginDisabled(op == 2);
+            if (th_button(op == 2 ? "Improving…" : "Improve", third3, 28, TH_BTN)) { llm_cfg_save(); llm_optimize(rt->system); optFor = r; optNote[0] = 0; }
+            igEndDisabled();
+            if (igIsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) igSetTooltip("Let the model rewrite this prompt to be clearer,\nkeeping every rule (you can undo)");
+            igSameLine(0, 8);
+            igBeginDisabled(hasUndo != r);
+            if (th_button("Undo", third3, 28, TH_BTN)) { snprintf(rt->system, sizeof rt->system, "%s", undo); hasUndo = -1; dirty = 1; }
+            igEndDisabled();
+            igSameLine(0, 8);
+            if (th_button("Default", third3, 28, TH_BTN)) { snprintf(undo, sizeof undo, "%s", rt->system); hasUndo = r; llm_reset_prompt(r); dirty = 1; }
+            if (igIsItemHovered(0)) igSetTooltip("Back to this route's default prompt");
+            igPopID();
+            igEndTabItem();
+          }
+          if (igBeginTabItem("Router", NULL, tabflag("Router"))) { // the action model: picks the route
+            bool on = lc->actionOn;
+            if (igCheckbox("Ask the chat model which route to take", &on)) { lc->actionOn = on; dirty = 1; }
+            igPushTextWrapPos(full + 16);
+            igTextDisabled("Clear cues decide first (\"price\", \"weather\" → Research; \"prove\", \"code\" → Think). "
+                           "Otherwise the chat model answers with one word, thinking off (~1 s). If it can't, jev and the message length decide.");
+            igPopTextWrapPos();
+            label("ROUTER PROMPT");
+            dirty |= igInputTextMultiline("##act", lc->actionPrompt, sizeof lc->actionPrompt, (ImVec2_c){full, 170}, ImGuiInputTextFlags_WordWrap, NULL, NULL);
+            float half3 = (full - 8) / 2;
+            if (th_button("Test routing", half3, 28, TH_BTN)) { llm_cfg_save(); llm_router_test(); }
+            if (igIsItemHovered(0)) igSetTooltip("Route five sample messages");
+            igSameLine(0, 8);
+            if (th_button("Default##act", half3, 28, TH_BTN)) { llm_reset_action_prompt(); dirty = 1; }
+            static char tryMsg[300];
+            igSetNextItemWidth(full - 74);
+            int go = igInputTextWithHint("##try", "try a message…", tryMsg, sizeof tryMsg, ImGuiInputTextFlags_EnterReturnsTrue, NULL, NULL);
+            igSameLine(0, 6);
+            if ((th_button("Route", 66, 0, TH_BTN) || go) && *tryMsg) { llm_cfg_save(); llm_router_try(tryMsg); }
+            char rm[600]; int rs = llm_router_state(rm, sizeof rm);
+            if (rs != TEST_NONE || *rm) {
+              status_dot(rs, clock_);
+              igPushTextWrapPos(full + 16); igTextDisabled("%s", rm); igPopTextWrapPos();
+            }
+            igEndTabItem();
+          }
+          igEndTabBar();
+        }
+        if (*optNote) { igPushTextWrapPos(full + 16); igTextColored(RGB(TH->danger, 1), "%s", optNote); igPopTextWrapPos(); }
+        igEndTabItem();
+      }
+
+      // --- jev (SystemOne) routing: its own model and its own question set
+      if (igBeginTabItem("jev", NULL, tabflag("jev"))) {
+        bool on = lc->routerOn;
+        if (igCheckbox("Use jev when the router model can't answer", &on)) { lc->routerOn = on; dirty = 1; }
+        if (igIsItemHovered(0)) igSetTooltip("jev (SystemOne API) scores whether a message needs the web.\nIt's the fallback when the chat model can't pick the route.");
+        if (igCollapsingHeader_TreeNodeFlags("Model", ImGuiTreeNodeFlags_DefaultOpen)) {
+          char jm[600]; int js = llm_jev_state(jm, sizeof jm);
+          status_dot(js, clock_);
+          igPushTextWrapPos(full + 16); igTextDisabled("%s", jm); igPopTextWrapPos();
+          label("SYSTEMONE API");
+          igSetNextItemWidth(full);
+          dirty |= igInputTextWithHint("##rurl", "http://127.0.0.1:8011/v1/systemone", lc->routerUrl, sizeof lc->routerUrl, 0, NULL, NULL);
+          label("RESEARCH FROM SCORE");
+          igSetNextItemWidth(full);
+          dirty |= igSliderFloat("##rcut", &lc->routerCut, 0.30f, 0.95f, "%.2f", 0);
+          if (igIsItemHovered(0)) igSetTooltip("jev's \"needs the web\" score from which a message goes to Research.\n0.65 was best on a labelled test set.");
+          if (th_button("Test jev", full, 28, TH_BTN)) { llm_cfg_save(); llm_jev_test(); }
+          if (igIsItemHovered(0)) igSetTooltip("jev's own scores for five sample messages");
+        }
+        if (igCollapsingHeader_TreeNodeFlags("Questions (prompt)", 0)) {
+          igPushTextWrapPos(full + 16);
+          igTextDisabled("The SystemOne request. \"{message}\" becomes the user's message; the first yes/no answer is read as \"needs the web\".");
+          igPopTextWrapPos();
+          dirty |= igInputTextMultiline("##schema", lc->routerSchema, sizeof lc->routerSchema, (ImVec2_c){full, 170}, ImGuiInputTextFlags_WordWrap, NULL, NULL);
+          if (th_button("Default questions", full, 28, TH_BTN)) { llm_reset_router_schema(); dirty = 1; }
+        }
+        igEndTabItem();
+      }
+
+      // --- web search and the oh-my-pi agent: how Research gets fresh information
+      if (igBeginTabItem("Search", NULL, tabflag("Search"))) {
+        if (igCollapsingHeader_TreeNodeFlags("Web search API", ImGuiTreeNodeFlags_DefaultOpen)) {
+          static const char *WN[] = {"Off", "Brave", "Exa", "Tavily"};
+          if (segmented("ws", WN, 4, &lc->wsProvider, full)) { dirty = 1; if (lc->wsProvider != WS_NONE && *lc->wsKey) { llm_cfg_save(); llm_search_test(); } }
+          if (lc->wsProvider != WS_NONE) {
+            label("API KEY");
+            igSetNextItemWidth(full - 74);
+            dirty |= igInputTextWithHint("##wskey", lc->wsProvider == WS_BRAVE ? "Brave Search API key" : lc->wsProvider == WS_EXA ? "Exa API key" : "Tavily API key",
+                                         lc->wsKey, sizeof lc->wsKey, ImGuiInputTextFlags_Password, NULL, NULL);
+            igSameLine(0, 6);
+            if (th_button("Test##ws", 66, 0, TH_BTN)) { llm_cfg_save(); llm_search_test(); }
+          }
+          char sm[200]; int ss = llm_search_state(sm, sizeof sm);
+          status_dot(ss, clock_);
+          igPushTextWrapPos(full + 16);
+          if (ss == TEST_FAIL) igTextColored(RGB(TH->danger, 1), "%s", sm); else igTextDisabled("%s", sm);
+          igPopTextWrapPos();
+        }
+        if (igCollapsingHeader_TreeNodeFlags("oh-my-pi agent", ImGuiTreeNodeFlags_DefaultOpen)) {
+          char am[200]; int as = llm_agent_state(am, sizeof am);
+          status_dot(as, clock_);
+          igPushTextWrapPos(full + 16);
+          if (as == TEST_FAIL) igTextColored(RGB(TH->danger, 1), "%s", am); else igTextDisabled("%s", am);
+          igPopTextWrapPos();
+          if (llm_agent_available()) {
+            label("AGENT MODEL");
+            char autoM[256]; LlmCfg probe = *lc; probe.agentModel[0] = 0; llm_agent_model(&probe, autoM, sizeof autoM);
+            char hintM[300]; snprintf(hintM, sizeof hintM, "auto: %s", *autoM ? autoM : "omp's default (not found for this endpoint)");
+            igSetNextItemWidth(full - 74);
+            dirty |= igInputTextWithHint("##amodel", hintM, lc->agentModel, sizeof lc->agentModel, 0, NULL, NULL);
+            if (igIsItemHovered(0)) igSetTooltip("omp --model. Empty: the provider in ~/.omp/agent/models.yml\nthat serves the chat endpoint and model.");
+            igSameLine(0, 6);
+            if (th_button("Test##ag", 66, 0, TH_BTN)) { llm_cfg_save(); llm_agent_test(); }
+            label("TIME LIMIT");
+            igSetNextItemWidth(full);
+            dirty |= igSliderInt("##asecs", &lc->agentSecs, 30, 600, "%d s", 0);
+          }
+        }
+        igEndTabItem();
+      }
+      igEndTabBar();
+    }
+    if (dirty) llm_cfg_save();
+    igEndTabItem();
+  }
+  igEndTabBar();
+  }
 
   igDummy((ImVec2_c){0, 4});
   igSeparator();
   float half = (full - 8) / 2;
-  if (igButton("Take a nap", (ImVec2_c){half, 32})) out |= OPT_NAP;
+  if (th_button("Take a nap", half, 34, TH_BTN)) out |= OPT_NAP;
   igSameLine(0, 8);
-  igPushStyleColor_Vec4(ImGuiCol_Text, RGB(0xf85149, 1));
-  igPushStyleColor_Vec4(ImGuiCol_ButtonHovered, RGB(0xda3633, 1));
-  if (igButton("Quit jelly", (ImVec2_c){half, 32})) out |= OPT_QUIT;
-  igPopStyleColor(2);
+  if (th_button("Quit jelly", half, 34, TH_BTN_DANGER)) out |= OPT_QUIT;
 
   ImVec2_c ws = igGetWindowSize();
   igEnd();
-  igRender();
 
-  glViewport(0, 0, W, H);
+  if (showEvents) events_pane(clock_);
+  if (showHistory) history_pane(clock_);
+  if (showServices) services_pane(clock_);
+
+  igRender();
+  glViewport(0, 0, CW, H);
   glClearColor(0, 0, 0, 0);
   glClear(GL_COLOR_BUFFER_BIT);
   ImGui_ImplOpenGL3_RenderDrawData(igGetDrawData());
   glXSwapBuffers(dpy, win);
   glXMakeCurrent(dpy, prevDraw, prevCtx);
-
-  // only the panel itself takes clicks; the rest of the canvas is transparent and click-through
-  int nh = (int)ceilf(ws.y);
-  if (nh > 50 && nh != panelH) {
-    panelH = nh;
-    XRectangle r = {0, 0, (unsigned short)W, (unsigned short)panelH};
-    XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, &r, 1, ShapeSet, Unsorted);
+  { // take the keyboard when a text field is activated (the panel is managed, so ask the window manager)
+    static double oclk; oclk += dt;
+    if (io->WantTextInput && !okb.prevWant && !okb.focused) kb_grab_soon(&okb, oclk - 0.2);
+    if (!io->WantTextInput) okb.grabTries = 0;
+    okb.prevWant = io->WantTextInput;
+    kb_tick(&okb, oclk);
   }
 
+  // only the panels take clicks; the rest of the canvas is transparent and click-through
+  int nh = (int)ceilf(ws.y);
+  static int popupWas;
+  int popup = igIsPopupOpen_Str("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+  if (popup != popupWas) { popupWas = popup; shapeDirty = 1; }
+  if (popup && shapeDirty) {
+    XRectangle all = {0, 0, CW, H};
+    XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, &all, 1, ShapeSet, Unsorted);
+    shapeDirty = 0;
+  }
+  if ((nh > 50 && nh != panelH) || shapeDirty) {
+    if (nh > 50) panelH = nh;
+    XRectangle r[2] = {{0, 0, (unsigned short)W, (unsigned short)panelH}, {W + GAP, 0, EW, EH}};
+    XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0, r, SIDE ? 2 : 1, ShapeSet, Unsorted);
+    if (shapeDirty && SIDE) { // opening the events pane: keep it on screen
+      int ox = winX, oy = winY;
+      clamp_to_screen();
+      if (ox != winX || oy != winY) XMoveWindow(dpy, win, winX, winY);
+    }
+    shapeDirty = 0;
+  }
+
+  if (wantPreview) { wantPreview = 0; out |= OPT_PREVIEW; }
   if (wantClose) { opt_close(); out |= OPT_CLOSED; }
   return out;
 }

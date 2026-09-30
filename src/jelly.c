@@ -13,12 +13,16 @@
 #include <GL/glx.h>
 #include <math.h>
 #include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <locale.h>
 
 #include "jelly.h"
 
@@ -35,7 +39,7 @@ const float FLAVOR_COLS[NFLAVORS][3] = {
     {0.25f, 0.62f, 0.96f}, {0.95f, 0.26f, 0.44f}, {0.38f, 0.80f, 0.30f}, {0.98f, 0.80f, 0.22f},
     {0.64f, 0.52f, 0.96f}, {1.00f, 0.60f, 0.48f}, {0.36f, 0.90f, 0.76f}};
 
-static Cfg cfg = {1, 0, {0.25f, 0.62f, 0.96f}, 0.5f, 60.0f, FACE_TINY, 0.6f};
+static Cfg cfg = {1, 0, {0.25f, 0.62f, 0.96f}, 0.5f, 60.0f, FACE_TINY, 0.6f, 1.0f, THEME_DARK};
 
 static void cfg_path(char *out, size_t n) {
   const char *h = getenv("HOME");
@@ -53,12 +57,17 @@ static void cfg_load(void) {
     else if (sscanf(line, "size=%f", &v) == 1) cfg.size = v < 3 ? (float[]){44, 60, 80}[(int)v] : v; // old files: 0..2
     else if (sscanf(line, "face=%d", &i) == 1) cfg.face = i;
     else if (sscanf(line, "pull=%f", &v) == 1) cfg.pull = v;
+    else if (sscanf(line, "opacity=%f", &v) == 1) cfg.opacity = v;
+    else if (sscanf(line, "theme=%d", &i) == 1) cfg.theme = i;
     else if (sscanf(line, "color=%f %f %f", &r, &g, &b) == 3) { cfg.col[0] = r; cfg.col[1] = g; cfg.col[2] = b; }
   }
   fclose(f);
   cfg.flex = clampf(cfg.flex, 0, 1);
   cfg.size = clampf(cfg.size, 36, 110);
   cfg.pull = clampf(cfg.pull, 0, 1);
+  cfg.opacity = clampf(cfg.opacity, 0.2f, 1);
+  if (cfg.theme < 0 || cfg.theme > 2) cfg.theme = THEME_DARK;
+  theme_select(cfg.theme);
   if (cfg.face != FACE_CLASSIC) cfg.face = FACE_TINY;
   if (cfg.flavor >= NFLAVORS) cfg.flavor = 0;
   if (cfg.flavor >= 0) memcpy(cfg.col, FLAVOR_COLS[cfg.flavor], sizeof cfg.col);
@@ -69,15 +78,15 @@ static void cfg_save(void) {
   char parent[512]; snprintf(parent, sizeof parent, "%s", d); *strrchr(parent, '/') = 0;
   mkdir(parent, 0755); mkdir(d, 0755);
   FILE *f = fopen(p, "w"); if (!f) return;
-  fprintf(f, "girl=%d\nflavor=%d\nflex=%.3f\nsize=%.0f\nface=%d\npull=%.3f\ncolor=%.3f %.3f %.3f\n", cfg.girl, cfg.flavor,
-          cfg.flex, cfg.size, cfg.face, cfg.pull, cfg.col[0], cfg.col[1], cfg.col[2]);
+  fprintf(f, "girl=%d\nflavor=%d\nflex=%.3f\nsize=%.0f\nface=%d\npull=%.3f\nopacity=%.2f\ntheme=%d\ncolor=%.3f %.3f %.3f\n", cfg.girl, cfg.flavor,
+          cfg.flex, cfg.size, cfg.face, cfg.pull, cfg.opacity, cfg.theme, cfg.col[0], cfg.col[1], cfg.col[2]);
   fclose(f);
 }
 
 /* ------------------------------------------------------------------ mesh */
 
-#define MAXV 700
-#define MAXT 1300
+#define MAXV 2600
+#define MAXT 5200
 static int nv, ntri;
 static float rest[MAXV][3], pos[MAXV][3], nrm[MAXV][3];
 static float rdir[MAXV][3], rlen[MAXV], off[MAXV], offV[MAXV], offSnap[MAXV];
@@ -86,15 +95,15 @@ static float hgt[MAXV], scr[MAXV][2], nvz[MAXV];
 static unsigned short tri[MAXT][3];
 static float bodyH = 1.56f;
 
-static int hk_a[4096], hk_b[4096], hk_v[4096];
+static int hk_a[16384], hk_b[16384], hk_v[16384];
 static void add_nbr(int a, int b) {
   for (int i = 0; i < nnbr[a]; i++) if (nbr[a][i] == b) return;
   if (nnbr[a] < 6) nbr[a][nnbr[a]++] = b;
 }
 static int midpoint(int a, int b) {
   if (a > b) { int t = a; a = b; b = t; }
-  unsigned h = ((unsigned)a * 73856093u ^ (unsigned)b * 19349663u) & 4095;
-  while (hk_a[h] != -1) { if (hk_a[h] == a && hk_b[h] == b) return hk_v[h]; h = (h + 1) & 4095; }
+  unsigned h = ((unsigned)a * 73856093u ^ (unsigned)b * 19349663u) & 16383;
+  while (hk_a[h] != -1) { if (hk_a[h] == a && hk_b[h] == b) return hk_v[h]; h = (h + 1) & 16383; }
   float m[3], l = 0;
   for (int k = 0; k < 3; k++) { m[k] = (rest[a][k] + rest[b][k]) * .5f; l += m[k] * m[k]; }
   l = sqrtf(l);
@@ -116,7 +125,7 @@ static void build_mesh(void) {
   }
   ntri = 20;
   for (int i = 0; i < 20; i++) for (int k = 0; k < 3; k++) tri[i][k] = it[i][k];
-  for (int lvl = 0; lvl < 3; lvl++) {
+  for (int lvl = 0; lvl < 4; lvl++) {
     memset(hk_a, -1, sizeof hk_a);
     static unsigned short nt[MAXT][3]; int n = 0;
     for (int i = 0; i < ntri; i++) {
@@ -179,6 +188,7 @@ static float R, footY;
 static const float TILT = 0.30f;
 static float cT, sT;
 static int running = 1;
+static int softGL; // running on Mesa software GL (see watchdog)
 
 enum { ST_IDLE, ST_WANDER, ST_DRAG, ST_FLING, ST_REST, ST_STAY }; // STAY: dropped somewhere, sits there quietly
 enum { HOP_WAIT, HOP_PREP, HOP_AIR };
@@ -191,6 +201,7 @@ static float Fx, Fy, Vx, Vy, tx, ty;
 static float hopPx, hopV, hopG;
 static float yawCur, pitchCur, pitch, pitchV;
 static int mouseActive; // the mouse moved in the last few seconds: the head follows it
+static float leanZ, leanZV, leanZT, attS; // attention lean in depth, and stretch taller / settle lower
 static float sq = 1, sqV, sqT = 1, yaw, yawV, yawT;
 static float flex;
 static int grabbed = -1, pressed, dragging, pressPick = -1;
@@ -203,7 +214,9 @@ static float pokeWin, petDist, zT;
 static float tilt, tiltV, tiltT, qTilt;      // sideways head tilt (question, curiosity, giggles)
 static int hurry, questioned, tickles;
 static float stillT, tickleWin, sweatT, lbX; // cursor-still time, tickle window, sweat timer, look-back direction
-static const float STAY_SECONDS = 300;       // after you drag it somewhere, it stays put this long
+static const float STAY_SECONDS = 300;
+static int wantChat;       // triple-clicked: open the chat box
+static float thinkT;       // thinking dots while the model works       // after you drag it somewhere, it stays put this long
 static int current_expr(void);
 
 typedef struct { int type; float x, y, vx, vy, life, max, size, rot; } Part;
@@ -220,6 +233,7 @@ static void spawn(int type, float x, float y) {
       case 17: p->vx = 0; p->vy = -14; p->life = 1.9f; p->size = R * 0.24f; p->rot = x < 0 ? 0.2f : -0.2f; break;
       case 19: p->vx = x < 0 ? -45 : 45; p->vy = -60; p->life = 0.9f; p->size = R * 0.10f; p->rot = x < 0 ? 0.4f : -0.4f; break;
       case 20: p->vx = x < 0 ? -30 : 30; p->vy = -6; p->life = 0.55f; p->size = R * 0.14f; break;
+      case 21: p->vx = 0; p->vy = -16; p->life = 1.1f; p->size = R * 0.075f; break;
       default: p->vx = 12; p->vy = -22; p->life = 2.4f; p->size = R * frand(0.10f, 0.15f); break;
       }
       p->max = p->life;
@@ -447,9 +461,13 @@ static void step(float dt, double t) {
   }
   case ST_STAY: // quiet: no wandering, no spontaneous antics; still breathes and reacts to you
     Vx = Vy = 0;
+    if (hopPx > 0 || hopV > 0) { // a little cheering hop in place
+      hopV -= R * 16 * dt; hopPx += hopV * dt;
+      if (hopPx <= 0) { hopPx = 0; hopV = 0; squash(0.35f); surf_poke(0, -1, 0, -4.0f, 1.5f); }
+    }
     sqT = current_expr() == EX_CURIOUS ? 1.06f : 1 + 0.015f * sinf((float)t * 1.4f);
     stT -= dt;
-    if (stT <= 0) go_idle(frand(1, 3));
+    if (stT <= 0 && chat_mode() == CH_HIDDEN) go_idle(frand(1, 3));
     break;
   case ST_REST:
     Vx = Vy = 0; restAge += dt;
@@ -487,13 +505,16 @@ static void step(float dt, double t) {
   rnd = clampf(rnd + rndV * dt, -0.25f, 1.25f);
 
   if (current_expr() == EX_LAUGH) sqT = 1 + 0.07f * sinf((float)t * 24); // giggle bounce
-  { float w = 2 * PI * 2.2f, z = 0.45f;
+  { float w = 2 * PI * 2.2f, z = 0.45f; // soft, slightly overshooting weight shifts
     tiltV += (-w * w * (tilt - tiltT) - 2 * z * w * tiltV) * dt;
-    tilt += tiltV * dt; }
+    tilt += tiltV * dt;
+    leanZV += (-w * w * (leanZ - leanZT) - 2 * z * w * leanZV) * dt;
+    leanZ += leanZV * dt; }
 
   /* ---- squash spring (volume preserving) and yaw ---- */
   float kS = lerpf(190, 110, f), dS = lerpf(18, 11, f);
-  sqV += (-kS * (sq - sqT) - dS * sqV) * dt;
+  float sqTarget = sqT + (st != ST_DRAG ? attS : 0); // looking up stretches it a little taller
+  sqV += (-kS * (sq - sqTarget) - dS * sqV) * dt;
   sq = clampf(sq + sqV * dt, 0.45f, 1.7f);
   if (mouseActive) yawT = yawCur;
   else if (st != ST_WANDER) yawT = (st == ST_IDLE || st == ST_DRAG || st == ST_STAY) ? yawCur : 0;
@@ -536,7 +557,7 @@ static void step(float dt, double t) {
     float r = rr * (1 + off[i] * (0.35f + 0.65f * hgt[i])); // base touches the floor, moves less
     float lx0 = rdir[i][0] * r, ly0 = rdir[i][1] * r + cyl, lz0 = rdir[i][2] * r;
     float gx = lx0 * sx, gy = ly0 * sq, gz = lz0 * sx;
-    gx += tilt * gy; // head tilt
+    gx += tilt * gy; gz += leanZ * gy; // head tilt / weight shift
     float g[3] = {gx * cy + gz * sy, gy, -gx * sy + gz * cy};
     if (fabsf(pitch) > 1e-4f) { // tip the head up / down toward the mouse
       float c0 = (0.62f + 0.36f * rnd) * sq, yy = g[1] - c0, zz = g[2];
@@ -608,7 +629,7 @@ static const char *JELLY_VS =
 static const char *JELLY_FS =
     "#version 330 core\n"
     "in vec3 vN; in float vY;\n"
-    "uniform vec3 uColor;\n"
+    "uniform vec3 uColor; uniform float uOpacity;\n"
     "out vec4 frag;\n"
     "float box(vec2 p, vec2 b, float s){ vec2 d=abs(p)-b; float o=length(max(d,0.))+min(max(d.x,d.y),0.);"
     "  return 1.0-smoothstep(-s,s,o); }\n"
@@ -639,7 +660,7 @@ static const char *JELLY_FS =
     "  float aB = mix(0.60, 0.93, thick);\n"
     "  vec3 rgb = body*aB*(1.0-F) + env(R)*F*0.75 + uColor*rim*0.30 + vec3(win*0.95 + spec*1.2);\n"
     "  float a = clamp(aB*(1.0-F) + F*0.75 + rim*0.15 + win*0.9 + spec, 0.0, 1.0);\n"
-    "  frag = vec4(min(rgb, vec3(a)), a);\n"
+    "  frag = vec4(min(rgb, vec3(a)), a) * uOpacity;\n"
     "}\n";
 
 static const char *QUAD_VS =
@@ -658,7 +679,7 @@ static const char *QUAD_VS =
 static const char *QUAD_FS =
     "#version 330 core\n"
     "in vec2 vUV;\n"
-    "uniform int uType; uniform vec4 uCol; uniform vec4 uP;\n"
+    "uniform int uType; uniform vec4 uCol; uniform vec4 uP; uniform float uOpacity;\n"
     "out vec4 frag;\n"
     "const vec3 INK = vec3(0.11,0.11,0.19);\n"
     "float seg(vec2 p, vec2 a, vec2 b){ vec2 pa=p-a, ba=b-a; float h=clamp(dot(pa,ba)/dot(ba,ba),0.,1.); return length(pa-ba*h); }\n"
@@ -671,7 +692,7 @@ static const char *QUAD_FS =
     "    float r2 = dot(p,p); a = exp(-r2*2.6)*0.30*uP.x;\n"
     "    c = mix(vec3(0.04,0.04,0.07), uCol.rgb*0.45, 0.55);\n"
     "    vec2 q = p - vec2(0.0,-0.22); float g = exp(-(q.x*q.x*5.0 + q.y*q.y*28.0))*uP.x;\n"
-    "    frag = vec4(c*a + uCol.rgb*g*0.28, a + g*0.22); return;\n"
+    "    frag = vec4(c*a + uCol.rgb*g*0.28, a + g*0.22) * uOpacity; return;\n"
     "  }\n"
     "  if(uType==1){\n" // open eye (+ lashes)
     "    float d = (length(p/vec2(uP.z*0.46, uP.z*0.58)) - 1.0)*0.46*uP.z; a = fill(d);\n"
@@ -725,6 +746,8 @@ static const char *QUAD_FS =
     "    float r = 0.5 * clamp(1.0 - (p.y + 0.2) * 0.95, 0.04, 1.0);\n"
     "    float d = p.y > -0.2 ? abs(p.x) - r : length(p - vec2(0.0, -0.2)) - 0.5;\n"
     "    a = fill(d * 0.8); c = mix(vec3(0.55, 0.80, 1.0), vec3(1.0), fill(length(p - vec2(-0.15, -0.3)) - 0.12));\n"
+    "  } else if(uType==21){\n" // thinking dot
+    "    a = fill(length(p) - 0.8); c = vec3(0.92, 0.95, 1.0);\n"
     "  } else if(uType==20){\n" // dust puff
     "    a = exp(-dot(p, p) * 3.0) * 0.55; c = vec3(0.88, 0.88, 0.92);\n"
     "  } else if(uType==14){\n" // heart
@@ -735,10 +758,11 @@ static const char *QUAD_FS =
     "    c = vec3(0.35,0.38,0.55);\n"
     "  }\n"
     "  a *= uCol.a;\n"
-    "  frag = vec4(c*a, a);\n"
+    "  frag = vec4(c*a, a) * uOpacity;\n"
     "}\n";
 
 static GLuint jprog, qprog, jvao, jvbo, jibo, qvao, qvbo;
+static GLint uJOpacity, uQOpacity;
 static GLint uJProj, uJTilt, uJColor, uQCenter, uQHalf, uQWin, uQRot, uQType, uQCol, uQP;
 
 static GLuint compile(GLenum type, const char *src) {
@@ -765,6 +789,7 @@ static void gl_init(void) {
   uQWin = glGetUniformLocation(qprog, "uWin"); uQRot = glGetUniformLocation(qprog, "uRot");
   uQType = glGetUniformLocation(qprog, "uType"); uQCol = glGetUniformLocation(qprog, "uCol");
   uQP = glGetUniformLocation(qprog, "uP");
+  uJOpacity = glGetUniformLocation(jprog, "uOpacity"); uQOpacity = glGetUniformLocation(qprog, "uOpacity");
 
   glGenVertexArrays(1, &jvao); glBindVertexArray(jvao);
   glGenBuffers(1, &jvbo); glBindBuffer(GL_ARRAY_BUFFER, jvbo);
@@ -823,6 +848,7 @@ static void render(void) {
   glDisable(GL_DEPTH_TEST);
   glUseProgram(qprog); glBindVertexArray(qvao);
   glUniform2f(uQWin, (float)W, (float)H);
+  glUniform1f(uQOpacity, cfg.opacity); // the whole jelly, face and shadow included
   float shrink = 1.0f / (1.0f + hopPx / (R * 0.8f));
   quad(0, W * 0.5f, footY + 0.04f * R, 1.30f * R * shrink / sqrtf(sq), 0.36f * R * shrink, 0, col[0], col[1], col[2], 1,
        shrink, 0, 0, 0);
@@ -836,6 +862,7 @@ static void render(void) {
   glUniform3f(uJProj, 2 * R / W, 2 * R / H, 1 - 2 * (footY - hopPx) / H);
   glUniform2f(uJTilt, cT, sT);
   glUniform3f(uJColor, col[0], col[1], col[2]);
+  glUniform1f(uJOpacity, cfg.opacity);
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LESS); glColorMask(0, 0, 0, 0);
   glDrawElements(GL_TRIANGLES, ntri * 3, GL_UNSIGNED_SHORT, 0);
@@ -977,7 +1004,7 @@ static void create_window(void) {
                 GLX_ALPHA_SIZE, 8, GLX_DEPTH_SIZE, 24, GLX_DOUBLEBUFFER, True, GLX_SAMPLE_BUFFERS, 1,
                 GLX_SAMPLES, 4, None};
   XVisualInfo *vi = NULL;
-  for (int pass = 0; pass < 2 && !vi; pass++) {
+  for (int pass = softGL; pass < 2 && !vi; pass++) { // (software GL: skip multisampling, it's costly on the CPU)
     if (pass == 1) { attr[20] = GLX_SAMPLE_BUFFERS; attr[21] = 0; attr[22] = GLX_SAMPLES; attr[23] = 0; }
     int n = 0; GLXFBConfig *fbs = glXChooseFBConfig(dpy, scr_n, attr, &n);
     for (int i = 0; i < n; i++) {
@@ -1007,7 +1034,8 @@ static void create_window(void) {
   if (!ctx) ctx = glXCreateNewContext(dpy, fb, GLX_RGBA_TYPE, NULL, True);
   XFree(vi);
   XMapRaised(dpy, win);
-  opt_init(dpy, fb);
+  opt_init(dpy, fb, ctx);
+  bub_init(dpy, fb, ctx);
   glXMakeCurrent(dpy, win, ctx);
   typedef void (*SwapFn)(Display *, GLXDrawable, int);
   SwapFn si = (SwapFn)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
@@ -1015,8 +1043,47 @@ static void create_window(void) {
 }
 
 static void on_sig(int s) { (void)s; running = 0; }
+static int on_xerror(Display *d, XErrorEvent *e) {
+  if (getenv("JELLY_DEBUG")) { char msg[128]; XGetErrorText(d, e->error_code, msg, sizeof msg); fprintf(stderr, "X error (ignored): %s\n", msg); }
+  return 0;
+}
 
-int main(void) {
+/* Watchdog: the jelly runs as a child process. On this GB10, NVIDIA GL crashes new windows in their first frames
+   while a big model holds most of the memory (e.g. TensorFold's ~90 GB): then it restarts on Mesa software GL.
+   A later crash just restarts it (at most a few times a minute). */
+extern char **environ;
+static int watchdog(char *self) {
+  int software = getenv("LIBGL_ALWAYS_SOFTWARE") != NULL, restarts = 0;
+  double windowStart = now();
+  for (;;) {
+    char *argv[] = {self, NULL};
+    if (software) { // one render thread: llvmpipe's worker threads spin and cost 4x the CPU for a window this small
+      setenv("__GLX_VENDOR_LIBRARY_NAME", "mesa", 1); setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
+      setenv("LP_NUM_THREADS", "1", 0);
+    }
+    setenv("JELLY_CHILD", "1", 1);
+    pid_t pid;
+    if (posix_spawn(&pid, "/proc/self/exe", NULL, NULL, argv, environ) != 0) return 1;
+    double t0 = now();
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) {}
+    if (WIFEXITED(st)) return WEXITSTATUS(st); // quit on purpose
+    int early = now() - t0 < 20 && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; // the driver's crash, not a bug of ours
+    if (early && !software) { // the GPU driver can't give us a window right now
+      fprintf(stderr, "jelly: GPU GL crashed at startup (memory pressure?); using software rendering\n");
+      software = 1;
+      continue;
+    }
+    if (now() - windowStart > 60) { windowStart = now(); restarts = 0; }
+    if (++restarts > 4) { fprintf(stderr, "jelly: crashed too often, giving up\n"); return 1; }
+    fprintf(stderr, "jelly: crashed (signal %d), restarting\n", WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+  }
+}
+
+int main(int argc, char **argv) {
+  (void)argc;
+  if (!getenv("JELLY_CHILD") && !getenv("JELLY_NO_WATCHDOG")) return watchdog(argv[0]);
+  softGL = getenv("LIBGL_ALWAYS_SOFTWARE") != NULL;
   srand((unsigned)time(NULL));
   signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
   cfg_load();
@@ -1024,8 +1091,10 @@ int main(void) {
   cT = cosf(TILT); sT = sinf(TILT);
   build_mesh(); build_anchors();
 
+  setlocale(LC_CTYPE, ""); // for the input method (CJK typing); numbers stay in the C locale
   dpy = XOpenDisplay(NULL);
   if (!dpy) { fprintf(stderr, "cannot open X display\n"); return 1; }
+  XSetErrorHandler(on_xerror);
   SW = DisplayWidth(dpy, DefaultScreen(dpy)); SH = DisplayHeight(dpy, DefaultScreen(dpy));
   apply_size(1);
   Fx = SW * frand(0.35f, 0.65f); Fy = by1 - frand(0, SH * 0.25f);
@@ -1033,6 +1102,31 @@ int main(void) {
   st = ST_WANDER; hopst = HOP_AIR; hopG = R * 16; hopPx = R * 1.2f; hopV = 0;
   create_window();
   gl_init();
+  cal_start();
+  kb_global_init(dpy);
+  chat_init(dpy, fb, ctx);
+  llm_start();
+  if (getenv("JELLY_CHAT_SELFTEST")) { // debugging aid: one message through the chat path, reply on stderr
+    // several questions separated by '|' are queued at once and answered in order
+    char all[2000]; snprintf(all, sizeof all, "%s", getenv("JELLY_CHAT_SELFTEST"));
+    int sent = 0;
+    for (char *save, *m = strtok_r(all, "|", &save); m; m = strtok_r(NULL, "|", &save)) sent += llm_send(m);
+    for (int got = 0, i = 0; got < sent && i < 6000; i++) {
+      char q[1200], r[8192], how[80];
+      int k = llm_take_reply(q, sizeof q, r, sizeof r, how, sizeof how);
+      if (k) { got++; fprintf(stderr, "selftest %s [%s] Q: %s\nA: %s\n", k > 0 ? "reply" : "error", how, q, r); }
+      else usleep(100000);
+    }
+    return 0;
+  }
+  if (getenv("JELLY_OPEN_CHAT")) wantChat = 1; // debugging aid: open the chat box
+  if (getenv("JELLY_CHAT_SEND")) { // ... and send this ("a|b|c": the earlier ones are queued first)
+    static char q[2000]; snprintf(q, sizeof q, "%s", getenv("JELLY_CHAT_SEND"));
+    char *last = strrchr(q, '|');
+    if (last) { *last++ = 0; for (char *sv, *m = strtok_r(q, "|", &sv); m; m = strtok_r(NULL, "|", &sv)) llm_send(m); }
+    wantChat = 1; chat_debug_send(last ? last : q);
+  }
+  if (getenv("JELLY_OPEN_EVENTS")) { opt_open(80, 80); opt_show_events(1); } // debugging aid: panel + events list
   compute_normals();
 
   double last = now(), acc = 0, shapeT = 0, raiseT = 0;
@@ -1041,8 +1135,16 @@ int main(void) {
     double frameStart = now();
     while (XPending(dpy)) {
       XEvent e; XNextEvent(dpy, &e);
+      if (XFilterEvent(&e, None)) continue; // the input method takes what it needs first
       if (opt_owns(e.xany.window)) { opt_event(&e); continue; }
+      if (chat_owns(e.xany.window)) { chat_event(&e); continue; }
+      if (bub_owns(e.xany.window)) { bub_event(&e); continue; }
       if (e.type == ButtonPress && e.xbutton.button == Button1) {
+        // three quick clicks open the chat box
+        static double clicks[3];
+        clicks[0] = clicks[1]; clicks[1] = clicks[2]; clicks[2] = frameStart;
+        if (clicks[2] - clicks[0] < 0.7) { wantChat = 1; clicks[0] = clicks[1] = clicks[2] = 0; }
+        if (chat_mode() == CH_WAIT) wantChat = 1; // it's thinking with the box hidden: one click shows the questions
         pressed = 1; dragging = 0; pressT = frameStart;
         pressX = curX = e.xbutton.x_root; pressY = curY = e.xbutton.y_root;
         pressPick = pick_vertex((float)e.xbutton.x, (float)e.xbutton.y);
@@ -1108,13 +1210,15 @@ int main(void) {
     static double mouseMovedAt; static float mlx, mly;
     if (hypotf(curX - mlx, curY - mly) > 1) mouseMovedAt = t;
     mlx = curX; mly = curY;
-    mouseActive = 0;
+    mouseActive = 0; leanZT = 0; attS = 0;
     if (st != ST_REST && current_expr() != EX_LOOKBACK && t - mouseMovedAt < 4.0) {
       float d = cd + 1e-3f, m = fminf(1, d / 160);
       lookTX = cdx / d * m; lookTY = cdy / d * m;
       yawCur = 0.75f * tanhf(cdx / 450);    // the whole head turns toward the mouse
       pitchCur = 0.40f * tanhf(-cdy / 500); // and tips up / down to it
       mouseActive = 1;
+      leanZT = 0.14f * tanhf(cdy / 600);   // weight shifts toward the mouse: forward when it's below
+      attS = 0.05f * tanhf(-cdy / 500);    // taller to look up, settles lower to look down
     }
     else if (st == ST_WANDER && hopst == HOP_AIR) { float d = hypotf(Vx, Vy) + 1e-3f; lookTX = Vx / d; lookTY = Vy / d * 0.5f; }
     else if ((glanceT -= (float)fdt) <= 0) {
@@ -1136,12 +1240,50 @@ int main(void) {
         if (exprT <= 0 || expr == EX_CURIOUS) set_expr(EX_CURIOUS, 0.25f);
       } else if (cd > 420) { questioned = 0; stillT = 0; }
     }
+    // is someone at the desk? keyboard / mouse idle time from the X screensaver extension (loaded at runtime)
+    {
+      static int tried; static void *(*xssAlloc)(void); static int (*xssQuery)(Display *, Drawable, void *);
+      static void *xssInfo; static double lastCheck, lastCal;
+      typedef struct { Window window; int state, kind; unsigned long til_or_since, idle, eventMask; } XSSInfo;
+      if (!tried) {
+        tried = 1;
+        void *h = dlopen("libXss.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (h) { xssAlloc = (void *(*)(void))dlsym(h, "XScreenSaverAllocInfo"); xssQuery = (int (*)(Display *, Drawable, void *))dlsym(h, "XScreenSaverQueryInfo"); }
+        if (xssAlloc && xssQuery) xssInfo = xssAlloc();
+      }
+      if (t - lastCheck > 2) {
+        lastCheck = t;
+        static double pointerAt; static float ppx, ppy;
+        if (hypotf(curX - ppx, curY - ppy) > 1) pointerAt = t;
+        ppx = curX; ppy = curY;
+        double idle = t - pointerAt;
+        if (xssInfo && xssQuery(dpy, DefaultRootWindow(dpy), xssInfo)) idle = ((XSSInfo *)xssInfo)->idle / 1000.0;
+        int atDesk = idle < 60;
+        if (atDesk && !bub_visible() && t - lastCal > 5) {
+          lastCal = t;
+          CalEvent ce;
+          if (cal_pick(time(NULL), &ce)) {
+            bub_show(&ce, cfg.col, 0);
+            if (getenv("JELLY_DEBUG")) fprintf(stderr, "bubble: show '%s' (idle %.0fs)\n", ce.title, idle);
+            set_expr(EX_SURPRISE, 0.9f); squash(-0.3f); surf_pulse(1.6f); // "oh! something's coming up"
+          }
+        }
+      }
+    }
+    if (bub_visible() && !mouseActive && st != ST_REST) { // keep an eye on the bubble
+      float bxs, bys; bub_center(&bxs, &bys);
+      float dx = bxs - Fx, dy = bys - (Fy - R), dd = hypotf(dx, dy) + 1e-3f;
+      lookTX = dx / dd; lookTY = dy / dd;
+      yawCur = 0.5f * tanhf(dx / 450);
+    }
     int exNow = current_expr();
     if (exNow == EX_LOOKBACK) { lookTX = lbX; lookTY = -0.2f; }
     if (exNow == EX_QUESTION) tiltT = qTilt;
     else if (exNow == EX_CURIOUS) tiltT = clampf(-cdx / 1500, -0.12f, 0.12f);
     else if (exNow == EX_LAUGH) tiltT = 0.07f * sinf((float)t * 7);
     else if (hurry && st == ST_WANDER) tiltT = clampf(Vx / (R * 20), -0.15f, 0.15f);
+    else if (chat_busy()) tiltT = 0.10f * sinf((float)t * 2.2f); // pondering
+    else if (mouseActive && st != ST_DRAG) tiltT = 0.16f * tanhf(cdx / 600); // lean the top toward the mouse
     else tiltT = 0;
     if (tickleWin > 0) tickleWin -= (float)fdt;
     if (hurry && st == ST_WANDER && (sweatT -= (float)fdt) <= 0) { sweatT = 0.8f; spawn(19, (rand() % 2 ? 0.55f : -0.55f) * R, -1.45f * R); }
@@ -1199,11 +1341,56 @@ int main(void) {
     if (of & OPT_NAP) { go_rest(frand(40, 90)); opt_close(); cfg_save(); }
     if (of & OPT_CLOSED) cfg_save();
     if (of & OPT_QUIT) { cfg_save(); running = 0; }
+    // the chat box: triple-click opens it; the jelly cheers when you send, thinks, and cheers again for the reply
+    if (wantChat) {
+      wantChat = 0;
+      chat_open(winX + W * 0.5f, winY + footY - hopPx - 1.5f * R * sq, R);
+      set_expr(EX_CURIOUS, 1.5f); surf_pulse(1.2f);
+    }
+    {
+      int cf = chat_frame(fdt, winX + W * 0.5f, winY + footY - hopPx - 1.3f * R * sq, R, cfg.col);
+      if (chat_mode() != CH_HIDDEN && (st == ST_IDLE || st == ST_WANDER || st == ST_STAY) && !(st == ST_WANDER && hopst == HOP_AIR))
+        if (st != ST_STAY || stT < 30) go_stay(600); // stay put while we talk
+      if (cf & CHAT_SENT) { // bump: "on it!"
+        if (st == ST_STAY && hopPx <= 0) hopV = R * 3.6f;
+        squash(-0.35f); surf_pulse(1.8f); set_expr(EX_HAPPY, 0.9f); thinkT = 0.6f;
+      }
+      if (cf & CHAT_REPLIED) { // cheers
+        if (st == ST_STAY && hopPx <= 0) hopV = R * 4.4f;
+        squash(-0.45f); surf_pulse(2.4f); set_expr(EX_HAPPY, 2.0f);
+        spawn(14, -0.35f * R, -1.6f * R); spawn(14, 0.35f * R, -1.7f * R);
+      }
+      if (cf & CHAT_ERROR) { set_expr(EX_DIZZY, 1.6f); surf_pulse(1.2f); }
+      if (cf & CHAT_CLOSED) { set_expr(EX_SMILE, 1.5f); if (st == ST_STAY) go_idle(frand(2, 4)); }
+      if (chat_busy()) { // thinking: three little dots rise in turn, head sways
+        if ((thinkT -= (float)fdt) <= 0) {
+          static int k; thinkT = 0.35f;
+          spawn(21, (-0.3f + 0.3f * (k++ % 3)) * R, -1.55f * R);
+        }
+        if (exprT <= 0.1f) set_expr(EX_CURIOUS, 0.2f);
+        lookTY = -0.6f;
+      }
+    }
+    if (of & OPT_PREVIEW) { // the next event, or a sample if there's nothing on the calendar
+      CalEvent evs_[4]; int n = cal_events(evs_, 4), k = -1; time_t now_ = time(NULL);
+      for (int i = 0; i < n && k < 0; i++) if (evs_[i].end > now_ || evs_[i].start > now_) k = i;
+      CalEvent ce;
+      if (k >= 0) ce = evs_[k];
+      else { memset(&ce, 0, sizeof ce); snprintf(ce.title, sizeof ce.title, "Coffee with a friend (sample)"); ce.start = now_ + 25 * 60; ce.end = ce.start + 1800; }
+      bub_show(&ce, cfg.col, 5.0); // a preview fades after five seconds
+      set_expr(EX_SURPRISE, 0.9f); squash(-0.3f); surf_pulse(1.6f);
+    }
+    {
+      float headX = winX + W * 0.5f, headY = winY + footY - hopPx - 1.5f * R * sq;
+      int bf = bub_frame(fdt, headX, headY, R);
+      if (bf && getenv("JELLY_DEBUG")) fprintf(stderr, "bubble: %s\n", bf == BUB_POPPED ? "popped by click" : "expired");
+      if (bf == BUB_POPPED) { set_expr(EX_HAPPY, 1.6f); surf_pulse(1.2f); spawn(14, 0.4f * R, -1.6f * R); }
+    }
     if (t - shapeT > 1.0 / 30) { update_input_shape(); shapeT = t; }
     XFlush(dpy);
 
     // cap to ~60 fps, and idle lighter while napping
-    double target = (st == ST_REST && restAge > 3) ? 1.0 / 30 : 1.0 / 60;
+    double target = (st == ST_REST && restAge > 3) || softGL ? 1.0 / 30 : 1.0 / 60; // software GL: 30 fps
     double spent = now() - frameStart;
     if (spent < target) usleep((useconds_t)((target - spent) * 1e6));
   }
