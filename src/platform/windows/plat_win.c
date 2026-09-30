@@ -90,6 +90,7 @@ static WCHAR *to_wide(const char *s) {
 
 static LARGE_INTEGER qpf;
 double plat_now(void) {
+  if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf); // (usable before plat_init)
   LARGE_INTEGER c; QueryPerformanceCounter(&c);
   return (double)c.QuadPart / (double)qpf.QuadPart;
 }
@@ -104,6 +105,7 @@ static void (*u_close)(void *);
 static void (*u_setDateTime)(void *, int, int, int, int, int, int, int *);
 static void (*u_set)(void *, int, int);
 static double (*u_getMillis)(void *, int *);
+static int (*u_canonical)(const WCHAR *, int, WCHAR *, int, signed char *, int *);
 static int icuTried;
 static void icu_load(void) {
   if (icuTried) return;
@@ -115,6 +117,7 @@ static void icu_load(void) {
   u_setDateTime = (void (*)(void *, int, int, int, int, int, int, int *))(void *)GetProcAddress(h, "ucal_setDateTime");
   u_set = (void (*)(void *, int, int))(void *)GetProcAddress(h, "ucal_set");
   u_getMillis = (double (*)(void *, int *))(void *)GetProcAddress(h, "ucal_getMillis");
+  u_canonical = (int (*)(const WCHAR *, int, WCHAR *, int, signed char *, int *))(void *)GetProcAddress(h, "ucal_getCanonicalTimeZoneID");
   if (!u_open || !u_close || !u_setDateTime || !u_set || !u_getMillis) u_open = NULL;
 }
 static void *zone_cal(const char *iana) {
@@ -130,10 +133,14 @@ static void *zone_cal(const char *iana) {
 int plat_zone_known(const char *z) {
   if (!z || !*z) return 0;
   if (!strcmp(z, "UTC")) return 1;
-  void *c = zone_cal(z);
-  if (!c) return 0;
-  u_close(c);
-  return 1;
+  icu_load();
+  if (!u_open || !u_canonical) return 0;
+  // ICU quietly falls back to "Etc/Unknown" for a name it doesn't know: ask whether it's a real zone
+  WCHAR *w = to_wide(z), out[128];
+  signed char isSystem = 0; int err = 0;
+  u_canonical(w, -1, out, 128, &isSystem, &err);
+  free(w);
+  return err <= 0 && isSystem;
 }
 time_t plat_mktime_in(struct tm *tm, const char *zone) {
   if (!zone) return mktime(tm);
