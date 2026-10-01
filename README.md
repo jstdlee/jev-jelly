@@ -234,5 +234,6 @@ tests/                core unit tests: JSON, routing, iCal parsing and time zone
 | `JELLY_OPT_TABS="LLM,jev"` · `JELLY_OPT_SERVICES=1` | open those tabs · run Test all |
 | `JELLY_PREVIEW=1` | show a reminder |
 | `JELLY_TEST_PASTE=text` (with `JELLY_OPT_TABS=LLM,Search`) | paste into the search key field while Ctrl is held |
+| `JELLY_TEST_SLIDER=1` (with `JELLY_OPT_TABS=Jelly`) | drag the opacity slider with Ctrl left "stuck" |
 | `JELLY_SHOT_DIR=dir` `JELLY_SHOT_AT=5` | save each surface as a transparent PNG after 5 s |
 | `JELLY_SMOKE=10` `JELLY_SMOKE_OUT=file` | run 10 s, then quit and write the frame count |

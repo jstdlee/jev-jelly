@@ -57,6 +57,10 @@ int ui_event(Ui *u, const PEvent *e) {
   case PE_MOVE: ImGuiIO_AddMousePosEvent(io, e->x, e->y); break;
   case PE_LEAVE: if (!u->dragging) ImGuiIO_AddMousePosEvent(io, -3.4e38f, -3.4e38f); break;
   case PE_BUTTON:
+    // the modifiers as they really are now: a stale Ctrl turns a click on a slider into "type a value"
+    ImGuiIO_AddKeyEvent(io, ImGuiMod_Ctrl, (e->mods & PM_CTRL) != 0);
+    ImGuiIO_AddKeyEvent(io, ImGuiMod_Shift, (e->mods & PM_SHIFT) != 0);
+    ImGuiIO_AddKeyEvent(io, ImGuiMod_Alt, (e->mods & PM_ALT) != 0);
     if (e->down) pw_clicked(u->win); // clicking back in takes the keyboard again
     ImGuiIO_AddMousePosEvent(io, e->x, e->y);
     ImGuiIO_AddMouseButtonEvent(io, e->button == PB_LEFT ? 0 : e->button == PB_RIGHT ? 1 : 2, e->down);

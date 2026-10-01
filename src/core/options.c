@@ -563,6 +563,16 @@ int opt_frame(Cfg *c, double dt) {
   igSetNextItemWidth(full);
   float pct = c->opacity * 100;
   if (igSliderFloat("##opacity", &pct, 20, 100, "%.0f%%", 0)) { c->opacity = pct / 100; out |= OPT_CHANGED; }
+  { // debugging aid: JELLY_TEST_SLIDER drags this slider with Ctrl left "stuck" (the old modifier bug), then reports
+    static int on = -1; if (on < 0) on = getenv("JELLY_TEST_SLIDER") != NULL;
+    ImVec2_c mn = igGetItemRectMin(), mx = igGetItemRectMax(); float y = (mn.y + mx.y) / 2;
+    if (on && dbgFrames == 30) { PEvent k = {0}; k.type = PE_KEY; k.win = ui.win; k.mods = PM_CTRL; ui_event(&ui, &k); }
+    if (on && dbgFrames == 32) { PEvent m = {0}; m.type = PE_MOVE; m.win = ui.win; m.x = mx.x - 10; m.y = y; ui_event(&ui, &m);
+                                 PEvent b = {0}; b.type = PE_BUTTON; b.win = ui.win; b.button = PB_LEFT; b.down = 1; b.x = mx.x - 10; b.y = y; ui_event(&ui, &b); }
+    if (on && dbgFrames >= 34 && dbgFrames < 44) { PEvent m = {0}; m.type = PE_MOVE; m.win = ui.win; m.x = mx.x - 10 - (dbgFrames - 33) * 15.f; m.y = y; ui_event(&ui, &m); }
+    if (on && dbgFrames == 45) { PEvent b = {0}; b.type = PE_BUTTON; b.win = ui.win; b.button = PB_LEFT; b.x = mn.x + 60; b.y = y; ui_event(&ui, &b); }
+    if (on && dbgFrames == 50) fprintf(stderr, "slider test: opacity %.0f%%, typing %d\n", c->opacity * 100, igGetIO_Nil()->WantTextInput);
+  }
 
   label("STRETCH");
   igSetNextItemWidth(full);

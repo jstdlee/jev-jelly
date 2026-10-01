@@ -336,6 +336,8 @@ static void translate(XEvent *xe) {
   case ButtonPress: case ButtonRelease: {
     int b = xe->xbutton.button, down = xe->type == ButtonPress;
     fill_pointer(&e, xe->xbutton.x, xe->xbutton.y, xe->xbutton.x_root, xe->xbutton.y_root);
+    unsigned st = xe->xbutton.state;
+    e.mods = (st & ControlMask ? PM_CTRL : 0) | (st & ShiftMask ? PM_SHIFT : 0) | (st & Mod1Mask ? PM_ALT : 0);
     if (b == Button4 || b == Button5) { if (!down) break; e.type = PE_WHEEL; e.wheel = b == Button4 ? 1.f : -1.f; }
     else if (b >= 1 && b <= 3) { e.type = PE_BUTTON; e.button = b == 1 ? PB_LEFT : b == 2 ? PB_MIDDLE : PB_RIGHT; e.down = down; }
     else break;
@@ -355,6 +357,10 @@ static void translate(XEvent *xe) {
     int down = xe->type == KeyPress;
     e.mods = (ke->state & ControlMask ? PM_CTRL : 0) | (ke->state & ShiftMask ? PM_SHIFT : 0) | (ke->state & Mod1Mask ? PM_ALT : 0);
     KeySym sym = ke->keycode ? XLookupKeysym(ke, 0) : NoSymbol;
+    // X reports the modifiers as they were *before* this event: pressing or releasing a modifier changes its own bit
+    int bit = sym == XK_Control_L || sym == XK_Control_R ? PM_CTRL : sym == XK_Shift_L || sym == XK_Shift_R ? PM_SHIFT
+            : sym == XK_Alt_L || sym == XK_Alt_R || sym == XK_Meta_L || sym == XK_Meta_R ? PM_ALT : 0;
+    if (bit) e.mods = down ? (e.mods | bit) : (e.mods & ~bit);
     e.type = PE_KEY; e.down = down; e.key = map_key(sym);
     queue[qn++] = e;
     if (!down || (ke->state & ControlMask)) break;

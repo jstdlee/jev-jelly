@@ -192,6 +192,7 @@ static void pointer_event(PWin *p, int type, LPARAM lp, PEvent *e) {
   e->x = (float)pt.x; e->y = (float)pt.y;
   ClientToScreen(p->hwnd, &pt);
   e->rx = (float)pt.x; e->ry = (float)pt.y;
+  e->mods = mods_now();
 }
 
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {

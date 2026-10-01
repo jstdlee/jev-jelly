@@ -27,7 +27,7 @@ typedef struct {
   float rx, ry;     // pointer, on the screen
   int button, down; // PE_BUTTON: PB_*, pressed / released; PE_KEY: pressed / released; PE_FOCUS: gained / lost
   float wheel;      // PE_WHEEL: + up
-  int key, mods;    // PE_KEY: an ImGuiKey, PM_* modifiers
+  int key, mods;    // PE_KEY: an ImGuiKey; PM_* modifiers held (PE_KEY and PE_BUTTON)
   int tag;          // PE_PASTE: the tag given to pw_request_paste
   char text[32];    // PE_TEXT: UTF-8 characters typed
   char *paste;      // PE_PASTE: the clipboard text (malloc'd, freed by the next plat_poll), or NULL
