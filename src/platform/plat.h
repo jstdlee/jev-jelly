@@ -87,6 +87,7 @@ void plat_private_file(const char *path);                      // readable by th
 FILE *plat_temp_file(char *path, size_t n);                    // a new private temp file, open for writing
 int plat_font(int cjk, char *out, size_t n);                   // a UI font (cjk = 0) or a CJK fallback font (1, 2 = bold)
 int plat_find_exe(const char *name, char *out, size_t n);      // on PATH (or a known place), 1 if found
+void plat_path_prepend(const char *dir);                       // put a directory first on this process's PATH
 /* Runs a program with `in` on stdin (may be NULL) and returns its stdout (malloc'd, NULL if it couldn't start).
    *status is the exit code (-1 if killed). The program is found on PATH unless it's a path. */
 char *plat_run(const char *prog, char *const argv[], const char *in, int *status);

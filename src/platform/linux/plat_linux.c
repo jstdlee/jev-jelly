@@ -502,6 +502,15 @@ int plat_find_exe(const char *name, char *out, size_t n) {
   return 0;
 }
 
+void plat_path_prepend(const char *dir) {
+  const char *p = getenv("PATH");
+  if (p && !strncmp(p, dir, strlen(dir)) && (p[strlen(dir)] == ':' || !p[strlen(dir)])) return; // already first
+  char *np = malloc(strlen(dir) + (p ? strlen(p) : 0) + 2);
+  sprintf(np, "%s%s%s", dir, p && *p ? ":" : "", p ? p : "");
+  setenv("PATH", np, 1);
+  free(np);
+}
+
 /* posix_spawn, not fork: forking a process that holds a GL context is unsafe */
 char *plat_run(const char *prog, char *const argv[], const char *in, int *status) {
   int pin[2], pout[2];

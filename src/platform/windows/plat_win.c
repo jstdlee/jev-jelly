@@ -585,6 +585,16 @@ int plat_find_exe(const char *name, char *out, size_t n) {
   return found;
 }
 
+void plat_path_prepend(const char *dir) {
+  const char *p = getenv("PATH");
+  size_t n = strlen(dir) + (p ? strlen(p) : 0) + 2;
+  char *np = malloc(n);
+  snprintf(np, n, "%s;%s", dir, p ? p : "");
+  _putenv_s("PATH", np);
+  SetEnvironmentVariableA("PATH", np); // what child processes inherit
+  free(np);
+}
+
 /* Windows command-line quoting (the rules CommandLineToArgvW and the C runtime parse by) */
 static void quote_arg(char **buf, size_t *len, size_t *cap, const char *a) {
 #define PUT(ch) do { if (*len + 2 > *cap) { *cap *= 2; *buf = realloc(*buf, *cap); } (*buf)[(*len)++] = (ch); } while (0)

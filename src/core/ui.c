@@ -4,7 +4,14 @@
 #include "gl.h"
 #include "shot.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Pasting: the clipboard arrives a moment after Ctrl+V (on X11 it's asynchronous), usually while Ctrl is still held,
+   and ImGui ignores typed characters while Ctrl is down. So the text is handed to ImGui as its clipboard and Ctrl+V
+   is replayed: ImGui pastes it itself (replacing a selection, keeping a field's rules). */
+static char *clip;
+static const char *get_clip(ImGuiContext *ctx) { (void)ctx; return clip ? clip : ""; }
 
 void ui_init(Ui *u, const char *name, int w, int h, int flags, float fontSize) {
   memset(u, 0, sizeof *u);
@@ -17,6 +24,7 @@ void ui_init(Ui *u, const char *name, int w, int h, int flags, float fontSize) {
   igSetCurrentContext(u->ig);
   ImGuiIO *io = igGetIO_Nil();
   io->IniFilename = NULL;
+  igGetPlatformIO_Nil()->Platform_GetClipboardTextFn = get_clip;
   if (fontSize > 0) {
     char path[512];
     if (plat_font(0, path, sizeof path)) ImFontAtlas_AddFontFromFileTTF(io->Fonts, path, fontSize, NULL, NULL);
@@ -62,7 +70,15 @@ int ui_event(Ui *u, const PEvent *e) {
     if (e->key != ImGuiKey_None) ImGuiIO_AddKeyEvent(io, (ImGuiKey)e->key, e->down);
     break;
   case PE_TEXT: ImGuiIO_AddInputCharactersUTF8(io, e->text); break;
-  case PE_PASTE: if (e->tag == 0 && e->paste) ImGuiIO_AddInputCharactersUTF8(io, e->paste); break;
+  case PE_PASTE:
+    if (e->tag == 0 && e->paste) {
+      free(clip); clip = strdup(e->paste);
+      ImGuiIO_AddKeyEvent(io, ImGuiMod_Ctrl, true);
+      ImGuiIO_AddKeyEvent(io, ImGuiKey_V, true);
+      ImGuiIO_AddKeyEvent(io, ImGuiKey_V, false);
+      ImGuiIO_AddKeyEvent(io, ImGuiMod_Ctrl, false); // the next real key event brings the true state back
+    }
+    break;
   case PE_FOCUS: ImGuiIO_AddFocusEvent(io, e->down); break;
   default: return 0;
   }

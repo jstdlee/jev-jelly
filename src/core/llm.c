@@ -417,7 +417,8 @@ static int has_any(const char *msg, const char **words) {
 }
 /* Clear cues. Words that are common in small talk ("today", "now", "current") are left out on purpose: "how are
    you today?" is not a research question. */
-static const char *KW_RESEARCH[] = {"search", "look up", "google", "latest", "news", "right now", "weather", "forecast",
+static const char *KW_RESEARCH[] = {"ompi", " omp ", "omp ", "oh-my-pi", "oh my pi", "use the agent", "ask the agent",
+    "web access", "online", "internet", "google it", "search", "look up", "look it up", "google", "latest", "news", "right now", "weather", "forecast",
     "price", "stock", "exchange rate", "btc", "bitcoin", "ethereum", "crypto", "release", "version of", "http://",
     "https://", "www.", "research", "sources", "who won", "score", "tonight", "tomorrow", "this week", "election",
     "搜索", "查一下", "最新", "新闻", "天气", "价格", "股价", "汇率", "比特币", "明天", "检索", "検索", "調べ", "最新の",
@@ -569,7 +570,15 @@ static int web_search(const LlmCfg *c, const char *query, Hit *hits, int max, ch
 
 static char ompPath[512];
 int llm_agent_available(void) {
-  if (!*ompPath && !plat_find_exe("omp", ompPath, sizeof ompPath)) snprintf(ompPath, sizeof ompPath, "-");
+  if (!*ompPath) {
+    if (!plat_find_exe("omp", ompPath, sizeof ompPath)) snprintf(ompPath, sizeof ompPath, "-");
+    else { // omp runs on bun, which sits next to it (~/.bun/bin): started from a desktop icon, PATH doesn't have it
+      char dir[512]; snprintf(dir, sizeof dir, "%s", ompPath);
+      char *slash = strrchr(dir, '/'), *bs = strrchr(dir, '\\');
+      if (bs > slash) slash = bs;
+      if (slash) { *slash = 0; plat_path_prepend(dir); }
+    }
+  }
   return ompPath[0] != '-';
 }
 

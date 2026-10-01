@@ -826,6 +826,14 @@ int opt_frame(Cfg *c, double dt) {
           if (lc->wsProvider != WS_NONE) {
             label("API KEY");
             igSetNextItemWidth(full - 74);
+            static const char *pasteTest; static int ptInit; // debugging aid: JELLY_TEST_PASTE pastes into this field
+            if (!ptInit) { ptInit = 1; pasteTest = getenv("JELLY_TEST_PASTE"); }
+            if (pasteTest && dbgFrames == 30) igSetKeyboardFocusHere(0);
+            if (pasteTest && dbgFrames == 40) { // Ctrl is held when the clipboard arrives, as with a real Ctrl+V
+              PEvent k = {0}; k.type = PE_KEY; k.win = ui.win; k.down = 1; k.mods = PM_CTRL; k.key = ImGuiKey_None; ui_event(&ui, &k);
+              PEvent p = {0}; p.type = PE_PASTE; p.win = ui.win; p.paste = (char *)pasteTest; ui_event(&ui, &p);
+            }
+            if (pasteTest && dbgFrames == 60) fprintf(stderr, "paste test: field now '%s'\n", lc->wsKey);
             dirty |= igInputTextWithHint("##wskey", lc->wsProvider == WS_BRAVE ? "Brave Search API key" : lc->wsProvider == WS_EXA ? "Exa API key" : "Tavily API key",
                                          lc->wsKey, sizeof lc->wsKey, ImGuiInputTextFlags_Password, NULL, NULL);
             igSameLine(0, 6);

@@ -34,6 +34,9 @@ void test_llm(void) {
   CHECK(decide(&c, "Prove that sqrt 2 is irrational.", NULL, why, sizeof why) == ROUTE_THINK, "prove -> think (%s)", why);
   CHECK(decide(&c, "hi jelly!", NULL, why, sizeof why) == ROUTE_QUICK, "hi -> quick (%s)", why);
   CHECK(decide(&c, "how are you today?", NULL, why, sizeof why) == ROUTE_QUICK, "'today' in small talk stays quick (%s)", why);
+  CHECK(decide(&c, "use ompi to check it", NULL, why, sizeof why) == ROUTE_RESEARCH, "naming omp -> research, so the agent can look (%s)", why);
+  CHECK(decide(&c, "use omp to check tampines", NULL, why, sizeof why) == ROUTE_RESEARCH, "omp (%s)", why);
+  CHECK(decide(&c, "compare postgres and sqlite", NULL, why, sizeof why) == ROUTE_THINK, "'compare' isn't 'omp' (%s)", why);
   char longMsg[400]; memset(longMsg, 'a', 300); longMsg[300] = 0;
   CHECK(decide(&c, longMsg, NULL, why, sizeof why) == ROUTE_THINK, "a long message -> think (%s)", why);
 

@@ -114,7 +114,8 @@ How the router was chosen, measured on labelled messages (22 used while tuning p
 - **Router model**: the same endpoint and model, asked for one word.
 - **jev (SystemOne)**: the fallback router; its URL, threshold and question set are in LLM → jev.
 - **Web search**: Brave, Exa or Tavily with your API key. The top results go to the model with the question.
-- **oh-my-pi agent** (`omp`): answers Research questions when there's no search API, with its own web search. It
+- **oh-my-pi agent** (`omp`): answers Research questions when there's no search API, with its own web search
+  (saying "use omp to …" or "look it up online" sends a message there too). It
   is told to use your chat model: the provider in `~/.omp/agent/models.yml` that serves the same endpoint (or a
   model you set). Without that, omp would fall back to its own default model.
 - **Test all** (the check icon in the settings header) checks all of these, plus `curl`, the CJK font and your
@@ -223,5 +224,6 @@ tests/                core unit tests: JSON, routing, iCal parsing and time zone
 | `JELLY_OPEN_EVENTS=1` | open the settings with the events list |
 | `JELLY_OPT_TABS="LLM,jev"` · `JELLY_OPT_SERVICES=1` | open those tabs · run Test all |
 | `JELLY_PREVIEW=1` | show a reminder |
+| `JELLY_TEST_PASTE=text` (with `JELLY_OPT_TABS=LLM,Search`) | paste into the search key field while Ctrl is held |
 | `JELLY_SHOT_DIR=dir` `JELLY_SHOT_AT=5` | save each surface as a transparent PNG after 5 s |
 | `JELLY_SMOKE=10` `JELLY_SMOKE_OUT=file` | run 10 s, then quit and write the frame count |
