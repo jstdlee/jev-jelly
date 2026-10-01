@@ -43,6 +43,14 @@ static const char *RESEARCH_PROMPT =
     "If the results don't answer the question, say that plainly. Never guess prices, scores, dates or versions. "
     SAFETY_SHORT;
 
+static const char *DO_PROMPT =
+    "You are Jelly's hands: the user asked their desktop jelly friend to do something on this computer, and it "
+    "handed the job to you. Do it with your tools, then reply in one to three short sentences: what you did and the "
+    "result (or what went wrong and what they can try). Reply in the user's language, plain text, no emoji.\n"
+    "Never do anything destructive or hard to undo (deleting or overwriting data, uninstalling, sending messages, "
+    "spending money, changing security settings) unless the user asked for exactly that; if the request is unclear "
+    "or risky, don't act: say what you would do and ask.";
+
 /* the previous defaults, so settings that still hold them move to the new ones */
 static const char *OLD_BASE_PREFIX = "You are Jelly, a small squishy jelly friend who lives on the user's desktop.";
 
@@ -146,6 +154,7 @@ static const char *WHEN[NROUTES] = {
     "Greetings, small talk and simple questions: one to three sentences.",
     "Reasoning, math, code, planning, comparisons and in-depth explanations.",
     "Live or recent information: prices, weather, news, scores, rates, latest releases.",
+    "Tasks on this computer (when allowed in Search): start, open or set up apps, settings, files, commands.",
 };
 /* What jev (Julia-1) is asked. Measured on a labelled set of 22 messages: this yes/no question separates "needs the
    web" from everything else at 91% (threshold 0.65, the message under "user_message"). Julia's own multi-option
@@ -175,7 +184,8 @@ static void path_of(const char *name, char *out, size_t n) { plat_config_path(na
 LlmCfg *llm_cfg(void) { return &cfg; }
 void llm_reset_prompt(int r) {
   if (r < 0 || r >= NROUTES) return;
-  snprintf(cfg.route[r].system, sizeof cfg.route[r].system, "%s", r == ROUTE_THINK ? THINK_PROMPT : r == ROUTE_RESEARCH ? RESEARCH_PROMPT : QUICK_PROMPT);
+  snprintf(cfg.route[r].system, sizeof cfg.route[r].system, "%s", r == ROUTE_THINK ? THINK_PROMPT : r == ROUTE_RESEARCH ? RESEARCH_PROMPT
+           : r == ROUTE_DO ? DO_PROMPT : QUICK_PROMPT);
 }
 void llm_reset_router_schema(void) { snprintf(cfg.routerSchema, sizeof cfg.routerSchema, "%s", DEFAULT_SCHEMA); }
 void llm_reset_action_prompt(void) { snprintf(cfg.actionPrompt, sizeof cfg.actionPrompt, "%s", ACTION_PROMPT); }
@@ -190,6 +200,9 @@ static void cfg_defaults(void) {
   llm_reset_router_schema();
   cfg.agentSecs = 180; cfg.routerCut = 0.65f;
   cfg.actionOn = 1; llm_reset_action_prompt();
+  cfg.memoryMins = 30;
+  cfg.agentTasks = 0; cfg.agentApproval = AA_WRITE; // tasks are off until the user turns them on
+  cfg.route[ROUTE_DO].thinking = 0; cfg.route[ROUTE_DO].maxTokens = 800; cfg.route[ROUTE_DO].backend = RB_AGENT;
   for (int r = 0; r < NROUTES; r++) {
     llm_reset_prompt(r);
     snprintf(cfg.route[r].when, sizeof cfg.route[r].when, "%s", WHEN[r]);
@@ -256,6 +269,9 @@ static void cfg_load(void) {
     else if (!strcmp(k, "agent_model")) snprintf(cfg.agentModel, sizeof cfg.agentModel, "%s", v);
     else if (!strcmp(k, "router_cut")) cfg.routerCut = strtof(v, NULL);
     else if (!strcmp(k, "action_on")) cfg.actionOn = atoi(v);
+    else if (!strcmp(k, "memory_mins")) cfg.memoryMins = atoi(v);
+    else if (!strcmp(k, "agent_tasks")) cfg.agentTasks = atoi(v);
+    else if (!strcmp(k, "agent_approval")) cfg.agentApproval = atoi(v);
     else if (!strcmp(k, "action_prompt")) { unescape_line(v); snprintf(cfg.actionPrompt, sizeof cfg.actionPrompt, "%s", v); }
     else if (!strcmp(k, "prompt_version")) ver = atoi(v);
     // older single-prompt settings become the Quick route
@@ -272,6 +288,11 @@ static void cfg_load(void) {
       }
     if (strstr(cfg.routerSchema, "\"needs_research\"")) llm_reset_router_schema();
   }
+  if (ver < 3) { // the Do route arrived: its defaults (route 3 wasn't in the file before)
+    llm_reset_prompt(ROUTE_DO);
+    snprintf(cfg.route[ROUTE_DO].when, sizeof cfg.route[ROUTE_DO].when, "%s", WHEN[ROUTE_DO]);
+    cfg.route[ROUTE_DO].maxTokens = 800; cfg.route[ROUTE_DO].backend = RB_AGENT;
+  }
   for (int r = 0; r < NROUTES; r++) if (cfg.route[r].maxTokens < 32) cfg.route[r].maxTokens = 800;
   if (!(cfg.routerCut > 0.05f && cfg.routerCut < 0.99f)) cfg.routerCut = 0.65f;
   if (cfg.agentSecs < 30) cfg.agentSecs = 180;
@@ -285,9 +306,10 @@ void llm_cfg_save(void) {
   fprintf(f, "base=%s\nmodel=%s\nkey=%s\ntemperature=%.2f\nsave_history=%d\nrouter_on=%d\nrouter_url=%s\n",
           cfg.base, cfg.model, cfg.key, cfg.temperature, cfg.saveHistory, cfg.routerOn, cfg.routerUrl);
   put_multi(f, "router_schema", cfg.routerSchema);
-  fprintf(f, "ws_provider=%d\nws_key=%s\nagent_secs=%d\nagent_model=%s\nrouter_cut=%.2f\nprompt_version=2\n", cfg.wsProvider,
+  fprintf(f, "ws_provider=%d\nws_key=%s\nagent_secs=%d\nagent_model=%s\nrouter_cut=%.2f\nprompt_version=3\n", cfg.wsProvider,
           cfg.wsKey, cfg.agentSecs, cfg.agentModel, cfg.routerCut);
-  fprintf(f, "action_on=%d\n", cfg.actionOn);
+  fprintf(f, "action_on=%d\nmemory_mins=%d\nagent_tasks=%d\nagent_approval=%d\n", cfg.actionOn, cfg.memoryMins,
+          cfg.agentTasks, cfg.agentApproval);
   put_multi(f, "action_prompt", cfg.actionPrompt);
   for (int r = 0; r < NROUTES; r++) {
     char k[32];
@@ -417,8 +439,12 @@ static int has_any(const char *msg, const char **words) {
 }
 /* Clear cues. Words that are common in small talk ("today", "now", "current") are left out on purpose: "how are
    you today?" is not a research question. */
-static const char *KW_RESEARCH[] = {"ompi", " omp ", "omp ", "oh-my-pi", "oh my pi", "use the agent", "ask the agent",
-    "web access", "online", "internet", "google it", "search", "look up", "look it up", "google", "latest", "news", "right now", "weather", "forecast",
+/* naming the agent: it looks things up (Research), or, with tasks turned on, the router decides between that and Do */
+static const char *KW_AGENT[] = {"ompi", " omp ", "omp ", "oh-my-pi", "oh my pi", "use the agent", "ask the agent", NULL};
+/* "how do I install htop?" is a question, not a job, even if the router says "do" */
+static const char *KW_HOWTO[] = {"how do i", "how to", "how can i", "how would i", "how should i", "in python", "in c ",
+    "in javascript", "in rust", "explain", "怎么", "如何", "どうやって", "어떻게", NULL};
+static const char *KW_RESEARCH[] = {"web access", "online", "internet", "google it", "search", "look up", "look it up", "google", "latest", "news", "right now", "weather", "forecast",
     "price", "stock", "exchange rate", "btc", "bitcoin", "ethereum", "crypto", "release", "version of", "http://",
     "https://", "www.", "research", "sources", "who won", "score", "tonight", "tomorrow", "this week", "election",
     "搜索", "查一下", "最新", "新闻", "天气", "价格", "股价", "汇率", "比特币", "明天", "检索", "検索", "調べ", "最新の",
@@ -461,11 +487,16 @@ static int ask_action(const LlmCfg *c, const char *msg, double *secs) {
   LlmCfg k = *c;
   k.temperature = 0;
   const char *r[1] = {"user"}; char *t[1] = {(char *)msg};
-  Reply rep = chat_call(&k, c->actionPrompt, 0, 4, r, t, 1);
+  char sys[1400];
+  snprintf(sys, sizeof sys, "%s%s", c->actionPrompt, c->agentTasks ?
+           "\ndo - the user tells you to carry out an action on their computer right now: start, open, install, set up "
+           "or configure an app, change a setting, create or move files, run a command. A question about how to do "
+           "something is not \"do\"." : "");
+  Reply rep = chat_call(&k, sys, 0, 4, r, t, 1);
   *secs = rep.secs;
   if (!rep.text) return -1;
   for (char *p = rep.text; *p; p++) *p = (char)tolower((unsigned char)*p);
-  int route = strstr(rep.text, "search") ? ROUTE_RESEARCH : strstr(rep.text, "think") ? ROUTE_THINK : strstr(rep.text, "quick") ? ROUTE_QUICK : -1;
+  int route = c->agentTasks && !strncmp(rep.text, "do", 2) ? ROUTE_DO : strstr(rep.text, "search") ? ROUTE_RESEARCH : strstr(rep.text, "think") ? ROUTE_THINK : strstr(rep.text, "quick") ? ROUTE_QUICK : -1;
   free(rep.text);
   return route;
 }
@@ -478,15 +509,20 @@ static int decide(const LlmCfg *c, const char *msg, JevSays *jout, char *why, si
   JevSays j = {0};
   j.web = NAN;
   if (jout) *jout = j;
-  if (kwR) { snprintf(why, n, "asks for live info"); return ROUTE_RESEARCH; }
-  if (kwT) { snprintf(why, n, "a thinking task"); return ROUTE_THINK; }
+  int kwA = has_any(msg, KW_AGENT);
+  if (kwA && !c->agentTasks) { snprintf(why, n, "asks the agent to look"); return ROUTE_RESEARCH; }
+  if (kwR && !kwA) { snprintf(why, n, "asks for live info"); return ROUTE_RESEARCH; }
+  if (kwT && !kwA) { snprintf(why, n, "a thinking task"); return ROUTE_THINK; }
   char am[40] = "";
   if (c->actionOn) {
     double secs = 0;
     int a = ask_action(c, msg, &secs);
+    if (a == ROUTE_DO && has_any(msg, KW_HOWTO)) { snprintf(why, n, "action model · a how-to question · %.1f s", secs); return ROUTE_THINK; }
+    if (kwA && a != ROUTE_DO) { snprintf(why, n, "asks the agent to look · %.1f s", secs); return ROUTE_RESEARCH; }
     if (a >= 0) { snprintf(why, n, "action model · %.1f s", secs); return a; }
     snprintf(am, sizeof am, "action model offline · ");
   }
+  if (kwA) { snprintf(why, n, "%sasks the agent", am); return kwR || !c->agentTasks ? ROUTE_RESEARCH : ROUTE_DO; }
   if (c->routerOn) j = ask_jev(c, msg);
   if (jout) *jout = j;
   char jv[48];
@@ -634,14 +670,23 @@ void llm_agent_model(const LlmCfg *c, char *out, size_t n) {
   if (!*out && *any) snprintf(out, n, "%s", any);
 }
 
-static Reply run_agent(const LlmCfg *c, const char *system, const char *prompt, int secsLimit, const char *tools) {
+/* tools NULL: all of omp's tools, with `approval` (AA_*) deciding what runs without asking, from the home folder */
+static Reply run_agent(const LlmCfg *c, const char *system, const char *prompt, int secsLimit, const char *tools, int approval) {
   Reply r = {0};
   if (!llm_agent_available()) { snprintf(r.err, sizeof r.err, "oh-my-pi (omp) is not installed"); return r; }
   char secs[32]; snprintf(secs, sizeof secs, "%ds", secsLimit);
   char model[256]; llm_agent_model(c, model, sizeof model);
-  char *argv[20]; int a = 0;
+  char *argv[24]; int a = 0;
   argv[a++] = "omp"; argv[a++] = "-p"; argv[a++] = "--no-session"; argv[a++] = "--mode"; argv[a++] = "text";
-  argv[a++] = "--thinking"; argv[a++] = "low"; argv[a++] = "--tools"; argv[a++] = (char *)tools;
+  argv[a++] = "--thinking"; argv[a++] = "low";
+  if (tools) { argv[a++] = "--tools"; argv[a++] = (char *)tools; }
+  else {
+    static const char *modes[] = {"always-ask", "write", "yolo"};
+    argv[a++] = "--approval-mode"; argv[a++] = (char *)modes[approval < 0 ? 0 : approval > 2 ? 2 : approval];
+    const char *h = home_dir();
+    static char cwd[512]; snprintf(cwd, sizeof cwd, "%s", h);
+    argv[a++] = "--allow-home"; argv[a++] = "--cwd"; argv[a++] = cwd;
+  }
   argv[a++] = "--max-time"; argv[a++] = secs;
   if (*model) { argv[a++] = "--model"; argv[a++] = model; }
   if (system && *system) { argv[a++] = "--append-system-prompt"; argv[a++] = (char *)system; }
@@ -677,6 +722,7 @@ static long sessionId;
 typedef struct { char *q, *a; char label[80]; int route, err; } LlmReply;
 static char *pending[QMAX];
 static char *workingQ; // the question being answered right now (owned by the worker)
+static time_t lastActivity; // the latest question or answer: the memory lasts memoryMins after it
 static int npending, working, gen; // gen: bumped when the conversation ends, so a late answer is dropped
 static LlmReply ready[QMAX];
 static int nready;
@@ -743,9 +789,15 @@ static Reply answer(const LlmCfg *c, const char **r, char **t, int n, int *route
     if (rt->backend != RB_MODEL && llm_agent_available()) {
       Buf q = {0}; // the agent has its own long system prompt: restate the language and ask for honesty about sources
       bstr(&q, "Answer in the same language as this question (not any other language). Search the web if you can; if you "
-               "can't get results, say so plainly instead of guessing.\n\nQuestion: ");
+               "can't get results, say so plainly instead of guessing.\n\n");
+      if (n > 1) { // what was said just before, so "and tomorrow?" or "check it there" make sense
+        bstr(&q, "Earlier in this conversation:\n");
+        for (int i = n - 1 > 6 ? n - 7 : 0; i < n - 1; i++) bfmt(&q, "%s: %.300s\n", !strcmp(r[i], "user") ? "User" : "Jelly", t[i]);
+        bstr(&q, "\n");
+      }
+      bstr(&q, "Question: ");
       bstr(&q, t[n - 1]);
-      Reply rep = run_agent(c, rt->system, q.s, c->agentSecs, "web_search,read");
+      Reply rep = run_agent(c, rt->system, q.s, c->agentSecs, "web_search,read", 0);
       free(q.s);
       if (rep.text) { snprintf(label, ln, "asked the agent"); return rep; }
       if (getenv("JELLY_DEBUG")) fprintf(stderr, "llm: agent failed: %s\n", rep.err);
@@ -759,6 +811,37 @@ static Reply answer(const LlmCfg *c, const char **r, char **t, int n, int *route
     Reply rep = chat_call(c, rt->system, 0, rt->maxTokens, r, t, n);
     t[n - 1] = keep; free(b.s);
     snprintf(label, ln, "no web access: from memory");
+    return rep;
+  }
+  if (route == ROUTE_DO) {
+    if (c->agentTasks && llm_agent_available()) { // oh-my-pi does the job, with the conversation for context
+      Buf q = {0};
+      bstr(&q, "Reply in the same language as the request.\n\n");
+      if (n > 1) {
+        bstr(&q, "Earlier in this conversation:\n");
+        for (int i = n - 1 > 6 ? n - 7 : 0; i < n - 1; i++) bfmt(&q, "%s: %.300s\n", !strcmp(r[i], "user") ? "User" : "Jelly", t[i]);
+        bstr(&q, "\n");
+      }
+      bstr(&q, "Request: "); bstr(&q, t[n - 1]);
+      Reply rep = run_agent(c, rt->system, q.s, c->agentSecs, NULL, c->agentApproval);
+      free(q.s);
+      if (rep.text) { snprintf(label, ln, "the agent did it"); return rep; }
+      if (getenv("JELLY_DEBUG")) fprintf(stderr, "llm: agent task failed: %s\n", rep.err);
+      snprintf(label, ln, "the agent couldn't: %.40s", rep.err);
+      return rep;
+    }
+    // tasks are off (or omp is missing): say so instead of pretending
+    Buf b = {0};
+    bstr(&b, llm_agent_available() ? "(You can't act on the computer: tasks for oh-my-pi are turned off in LLM > Search. Say so "
+                                     "in one short sentence and, if it helps, how the user could do it themselves.)\n\n"
+                                   : "(You can't act on the computer: oh-my-pi isn't installed. Say so in one short sentence and, "
+                                     "if it helps, how the user could do it themselves.)\n\n");
+    bstr(&b, t[n - 1]);
+    char *keep = t[n - 1]; t[n - 1] = b.s;
+    const LlmRoute *qr = &c->route[ROUTE_QUICK];
+    Reply rep = chat_call(c, qr->system, 0, qr->maxTokens, r, t, n);
+    t[n - 1] = keep; free(b.s);
+    snprintf(label, ln, "tasks are off");
     return rep;
   }
   snprintf(label, ln, "%s", route == ROUTE_THINK ? "thought it through" : "");
@@ -779,6 +862,12 @@ static void *worker(void *arg) {
       memmove(pending, pending + 1, sizeof pending[0] * (size_t)--npending);
       working = 1; workingQ = q;
       int myGen = gen;
+      // memory: a conversation idle for longer than memoryMins starts afresh
+      if (nturns && lastActivity && cfg.memoryMins > 0 && time(NULL) - lastActivity > (time_t)cfg.memoryMins * 60) {
+        for (int i = 0; i < nturns; i++) free(texts[i]);
+        nturns = 0; sessionId = 0;
+      }
+      lastActivity = time(NULL);
       if (!sessionId) sessionId = (long)time(NULL);
       if (nturns >= MAXTURNS) { // forget the oldest exchange
         free(texts[0]); free(texts[1]);
@@ -802,6 +891,7 @@ static void *worker(void *arg) {
       if (myGen != gen) { free(rep.text); free(q); } // the conversation was closed meanwhile
       else {
         if (rep.text) {
+          lastActivity = time(NULL);
           if (nturns < MAXTURNS) { roles[nturns] = "assistant"; texts[nturns++] = strdup(rep.text); }
           history_append("assistant", rep.text);
         } else if (nturns && !strcmp(roles[nturns - 1], "user")) free(texts[--nturns]); // let them try again
@@ -862,7 +952,7 @@ static void *worker(void *arg) {
     } else if (j == JOB_AGENT) {
       pthread_mutex_unlock(&mx);
       char model[256]; llm_agent_model(&c, model, sizeof model);
-      Reply rep = run_agent(&c, NULL, "Reply with just the word: pong", 90, "read");
+      Reply rep = run_agent(&c, NULL, "Reply with just the word: pong", 90, "read", 0);
       pthread_mutex_lock(&mx);
       if (rep.text) { agentState = TEST_OK; snprintf(agentMsg, sizeof agentMsg, "OK · %.120s · %.0f s", *model ? model : "omp default model", rep.secs); }
       else { agentState = TEST_FAIL; snprintf(agentMsg, sizeof agentMsg, "%s", rep.err); }
@@ -905,6 +995,17 @@ void llm_start(void) {
   if (started) return;
   started = 1;
   cfg_load();
+  // memory across restarts: a conversation from the last memoryMins carries on (from the saved history)
+  if (cfg.memoryMins > 0 && cfg.saveHistory) {
+    static LlmHist h[MAXTURNS];
+    int n = llm_history(h, MAXTURNS);
+    if (n && time(NULL) - h[n - 1].t < (time_t)cfg.memoryMins * 60) {
+      int first = n - 1; while (first > 0 && h[first - 1].session == h[n - 1].session) first--;
+      if (!h[first].user && first < n - 1) first++; // start on a question
+      for (int i = first; i < n && nturns < MAXTURNS; i++) { roles[nturns] = h[i].user ? "user" : "assistant"; texts[nturns++] = strdup(h[i].text); }
+      sessionId = h[n - 1].session; lastActivity = (time_t)h[n - 1].t;
+    }
+  }
   pthread_t th; pthread_create(&th, NULL, worker, NULL); pthread_detach(th);
   if (cfg.wsProvider != WS_NONE && *cfg.wsKey) llm_search_test(); // know early whether web search works
 }

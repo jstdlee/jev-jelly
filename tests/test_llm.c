@@ -37,6 +37,12 @@ void test_llm(void) {
   CHECK(decide(&c, "use ompi to check it", NULL, why, sizeof why) == ROUTE_RESEARCH, "naming omp -> research, so the agent can look (%s)", why);
   CHECK(decide(&c, "use omp to check tampines", NULL, why, sizeof why) == ROUTE_RESEARCH, "omp (%s)", why);
   CHECK(decide(&c, "compare postgres and sqlite", NULL, why, sizeof why) == ROUTE_THINK, "'compare' isn't 'omp' (%s)", why);
+  // tasks for the agent are opt-in: off, naming omp means "look it up"; on, a job goes to Do
+  CHECK(decide(&c, "use omp to start magpie", NULL, why, sizeof why) == ROUTE_RESEARCH, "tasks off: research (%s)", why);
+  c.agentTasks = 1;
+  CHECK(decide(&c, "use omp to start magpie", NULL, why, sizeof why) == ROUTE_DO, "tasks on: do (%s)", why);
+  CHECK(decide(&c, "use omp to check the weather tomorrow", NULL, why, sizeof why) == ROUTE_RESEARCH, "a lookup stays research (%s)", why);
+  c.agentTasks = 0;
   char longMsg[400]; memset(longMsg, 'a', 300); longMsg[300] = 0;
   CHECK(decide(&c, longMsg, NULL, why, sizeof why) == ROUTE_THINK, "a long message -> think (%s)", why);
 

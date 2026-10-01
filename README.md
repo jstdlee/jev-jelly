@@ -52,22 +52,31 @@ The calendar in them is made up.)*
 - **Each answer shows under its question**, game-dialogue style, with how it was answered ("thought it through",
   "searched the web", "asked the agent") and where it is in the conversation (`2 / 5`).
 - **Keys:** `r` reply · `n` next answer · `p` previous answer · `Enter` next if there is one, else reply ·
-  `Esc` hide (it keeps answering; one click on the jelly brings the box back).
-- **Move it** by dragging anywhere that isn't a control. It stays where you put it for the rest of the
-  conversation.
+  `Esc` closes the box at once (questions still being answered bring it back with their answer; one click on the
+  thinking jelly shows it too).
+- **It appears from the jelly**: the box glides out beside it and follows it around. Drag it anywhere that isn't a
+  control and it stays where you put it for the rest of the conversation.
+- **Memory:** Jelly remembers the conversation for 30 minutes after the last message (adjustable in the Chat tab,
+  with a *Forget* button), even across a restart. The agent gets the last few exchanges too.
 - Works with any **OpenAI-compatible** endpoint (a local TensorFold / vLLM / Ollama server, or a hosted API). The
   default personality is kawaii, cheerful, caring and curious, with safety guidance built in.
 - History is saved in `chat-history.jsonl` (mode 600) unless you switch that off; view or delete it in the Chat tab.
 
 ### The decision chain: which route answers a message
 
-Every message goes to one of three **routes**, each with its own prompt, reply length and thinking setting:
+Every message goes to one of the **routes**, each with its own prompt, reply length and thinking setting:
 
 | Route | For | Prompt |
 |---|---|---|
 | **Quick** | greetings, small talk, simple stable facts | deliberately tiny: one to three sentences back |
 | **Think** | reasoning, math, code, planning, comparisons | work it out first; conclusion first, then numbered steps |
 | **Research** | prices, weather, news, scores, schedules, latest versions | answer from fresh results, with numbers, dates and sources |
+| **Do** *(opt-in)* | jobs on this computer: "start omp and set up magpie", "open firefox" | oh-my-pi does it with its tools, then says what it did |
+
+**Do** is off until you turn on *Let jev hand tasks to oh-my-pi* (LLM → Search). Then the router can answer `do`,
+and oh-my-pi runs the job from your home folder with the permission level you pick there: *Read only*,
+*Edit files* or *Anything* (omp's own default). Its prompt tells it to ask first before anything destructive.
+A question about *how* to do something ("how do I install htop?") still goes to Think.
 
 ```mermaid
 flowchart TD

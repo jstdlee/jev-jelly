@@ -70,8 +70,9 @@ void bub_center(float *x, float *y);
 enum { OPT_PREVIEW = 16 };
 
 /* ---- chat with an OpenAI-compatible model (llm.c) ---- */
-#define NROUTES 3
-enum { ROUTE_QUICK, ROUTE_THINK, ROUTE_RESEARCH };
+#define NROUTES 4
+enum { ROUTE_QUICK, ROUTE_THINK, ROUTE_RESEARCH, ROUTE_DO }; // Do (opt-in): oh-my-pi carries out a task on this computer
+enum { AA_READ, AA_WRITE, AA_ALL };             // what the agent may do without asking: omp --approval-mode
 enum { RB_AUTO, RB_AGENT, RB_MODEL };           // research route: search+model / oh-my-pi agent / model only
 enum { WS_NONE, WS_BRAVE, WS_EXA, WS_TAVILY };     // web search providers (API key each)
 typedef struct {
@@ -91,6 +92,9 @@ typedef struct {
   int agentSecs;                        // oh-my-pi time limit
   char agentModel[128];                 // omp --model; empty: found in ~/.omp/agent/models.yml from base + model
   float routerCut;                      // jev "needs the web" score from which a message goes to Research
+  int agentTasks;                       // opt-in: the router may hand tasks to oh-my-pi (the Do route); off by default
+  int agentApproval;                    // AA_*: always-ask / write / yolo, for those tasks
+  int memoryMins;                       // how long the conversation is remembered after the last message (0: until the box closes)
   int actionOn;                         // ask the chat model for the route (one word) when no cue decides
   char actionPrompt[1024];
   LlmRoute route[NROUTES];

@@ -641,6 +641,13 @@ int opt_frame(Cfg *c, double dt) {
     int waiting = llm_waiting();
     if (waiting) igTextColored(ACCENT, waiting == 1 ? "Answering 1 question…" : "Answering %d questions…", waiting);
     igPopTextWrapPos();
+    label("MEMORY");
+    igSetNextItemWidth(full - 92);
+    if (igSliderInt("##mem", &lc->memoryMins, 0, 240, lc->memoryMins ? "remember %d min" : "until the box closes", 0)) dirty = 1;
+    if (igIsItemHovered(0)) igSetTooltip("How long Jelly remembers the conversation after the last message.\nIt carries on after a restart too (from the saved history).");
+    igSameLine(0, 8);
+    if (th_button("Forget##mem", 84, 0, TH_BTN)) llm_end_session();
+    if (igIsItemHovered(0)) igSetTooltip("Start a fresh conversation now");
     label("HISTORY");
     bool save = lc->saveHistory;
     if (igCheckbox("Save chat history", &save)) { lc->saveHistory = save; dirty = 1; }
@@ -719,7 +726,7 @@ int opt_frame(Cfg *c, double dt) {
           snprintf(undo, sizeof undo, "%s", lc->route[optFor].system); hasUndo = optFor;
           snprintf(lc->route[optFor].system, sizeof lc->route[optFor].system, "%s", better); dirty = 1; optNote[0] = 0;
         } else if (op == -1) snprintf(optNote, sizeof optNote, "Couldn't improve it: %.150s", better);
-        static const char *RN[NROUTES] = {"Quick", "Think", "Research"};
+        static const char *RN[NROUTES] = {"Quick", "Think", "Research", "Do"};
         if (igBeginTabBar("##routes", 0)) {
           for (int r = 0; r < NROUTES; r++) {
             if (!igBeginTabItem(RN[r], NULL, tabflag(RN[r]))) continue;
@@ -863,6 +870,20 @@ int opt_frame(Cfg *c, double dt) {
             label("TIME LIMIT");
             igSetNextItemWidth(full);
             dirty |= igSliderInt("##asecs", &lc->agentSecs, 30, 600, "%d s", 0);
+            label("TASKS ON THIS COMPUTER");
+            bool tasks = lc->agentTasks;
+            if (igCheckbox("Let jev hand tasks to oh-my-pi", &tasks)) { lc->agentTasks = tasks; dirty = 1; }
+            if (igIsItemHovered(0)) igSetTooltip("When the router decides a message is a job (\"start omp and set up magpie\",\n"
+                                                 "\"open firefox\"), oh-my-pi carries it out with its tools (the Do route).");
+            if (lc->agentTasks) {
+              static const char *AN[] = {"Read only", "Edit files", "Anything"};
+              if (segmented("aa", AN, 3, &lc->agentApproval, full)) dirty = 1;
+              igPushTextWrapPos(full + 16);
+              igTextDisabled(lc->agentApproval == AA_READ ? "It can look, not change anything." :
+                             lc->agentApproval == AA_WRITE ? "It can read and edit files, but not run commands." :
+                             "It can run commands and change anything you can (omp's own default). It asks first before anything destructive.");
+              igPopTextWrapPos();
+            }
           }
         }
         igEndTabItem();

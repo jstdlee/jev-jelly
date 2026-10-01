@@ -31,6 +31,10 @@ static char shown[16384]; // the reply (or error) on display
 static char shownQ[1200], shownHow[80]; // ... the question it answers, and how it was answered
 static int overItem;   // the pointer is over a control (last frame): a press there isn't a drag
 static int userPlaced; // they moved the box: keep it where they put it for the rest of the conversation
+static float px, py;   // where the box is (it glides toward its spot beside the jelly)
+static float anchorX, anchorY = -1e9f; // the jelly's head, ignoring small hops (so the box doesn't bob)
+static float appear;   // 0..1 fade in
+static int readyAtHide; // answers already waiting when the box was hidden: only a newer one brings it back
 
 /* every answer seen in this conversation, so n / p can page through them */
 #define SEEN 64
@@ -57,17 +61,34 @@ static void create(void) {
   created = 1;
 }
 
-static void place_near(float ax, float ay, float jr) {
-  if (userPlaced) return;
+/* the spot beside the jelly's head, on whichever side has room */
+static void spot_near(float ax, float ay, float jr, float *tx, float *ty) {
   int sw, sh; plat_screen(&sw, &sh);
-  int winX, winY, side = ax + jr + CWW + 30 < sw ? 1 : -1;
-  winX = (int)(side > 0 ? ax + jr * 0.9f : ax - jr * 0.9f - CWW);
-  winY = (int)(ay - bodyH - 90);
-  if (winX < 8) winX = 8;
-  if (winX + CWW > sw) winX = sw - CWW - 8;
-  if (winY < 8) winY = 8;
-  if (winY + CWH > sh) winY = sh - CWH - 8;
-  ui_move(&ui, winX, winY);
+  int side = ax + jr + CWW + 30 < sw ? 1 : -1;
+  float x = side > 0 ? ax + jr * 0.9f : ax - jr * 0.9f - CWW, y = ay - bodyH - 90;
+  if (x < 8) x = 8;
+  if (x + CWW > sw) x = (float)(sw - CWW - 8);
+  if (y < 8) y = 8;
+  if (y + CWH > sh) y = (float)(sh - CWH - 8);
+  *tx = x; *ty = y;
+}
+/* each frame: ease toward the spot (unless they placed the box themselves) */
+static void follow(float ax, float ay, float jr, double dt) {
+  if (userPlaced || ui.dragging) { px = (float)ui.x; py = (float)ui.y; return; }
+  if (fabsf(ax - anchorX) > 24 || fabsf(ay - anchorY) > 24) { anchorX = ax; anchorY = ay; } // a real move, not a hop
+  float tx, ty; spot_near(anchorX, anchorY, jr, &tx, &ty);
+  float k = 1 - expf(-(float)dt * 9);
+  px += (tx - px) * k; py += (ty - py) * k;
+  int nx = (int)lroundf(px), ny = (int)lroundf(py);
+  if (nx != ui.x || ny != ui.y) ui_move(&ui, nx, ny);
+}
+/* opening: the box starts at the jelly and glides out to its spot, fading in */
+static void emerge(float ax, float ay) {
+  appear = 0;
+  if (userPlaced) return;
+  anchorX = ax; anchorY = ay;
+  px = ax - CWW / 2.f; py = ay - OY - bodyH * 0.5f;
+  ui_move(&ui, (int)px, (int)py);
 }
 
 /* Each time the box appears it's raised above everything and asks for the keyboard (so Enter / Esc work straight
@@ -83,7 +104,8 @@ void chat_debug_send(const char *text) { snprintf(input, sizeof input, "%s", tex
 
 void chat_open(float ax, float ay, float jr) {
   if (!created) create();
-  if (!pw_visible(ui.win)) place_near(ax, ay, jr);
+  (void)jr;
+  if (!pw_visible(ui.win)) emerge(ax, ay);
   mode = CH_INPUT; focusInput = 1; // even while earlier questions are being answered: this one joins the queue
   show();
   grabNow = 1;
@@ -159,22 +181,25 @@ int chat_frame(double dt, float ax, float ay, float jr, const float tint[3]) {
   int out = CHAT_NONE;
   clk += dt;
 
-  // waiting for the model: nothing on screen, the jelly does the thinking
+  // hidden while the model works: the jelly does the thinking. A new answer brings the box back with it (the newest;
+  // the ones that were already waiting are there too, with p)
   if (mode == CH_WAIT) {
-    if (take_next()) {
+    if (llm_ready() > readyAtHide) {
+      while (take_next()) {}
       mode = CH_REPLY;
+      emerge(ax, ay);
       show();
       out = isError ? CHAT_ERROR : CHAT_REPLIED;
-    } else if (!llm_waiting()) { mode = CH_HIDDEN; return CHAT_NONE; } // nothing left (the conversation was reset)
+    } else if (!llm_waiting()) { mode = CH_HIDDEN; return CHAT_NONE; } // nothing left to wait for
     else return CHAT_NONE;
   }
+  follow(ax, ay, jr, dt);
 
   ui_frame_begin(&ui, dt);
   if (styled != theme()) restyle();
   const Theme *t = theme();
   ImGuiIO *io = igGetIO_Nil();
 
-  static float appear;
   appear = fminf(1, appear + (float)dt * 5); // fade in
   draw_glass(igGetBackgroundDrawList(NULL), bodyH, tint, appear);
 
@@ -232,11 +257,9 @@ int chat_frame(double dt, float ax, float ay, float jr, const float tint[3]) {
     igSameLine(0, 4);
     if (hint("esc", np ? "hide" : "close")) esc = 1;
     if (view && take_next()) mode = CH_REPLY;
-    else if (esc) {
-      if (readyN && take_next()) mode = CH_REPLY;
-      else if (waiting) mode = CH_WAIT; // hide and keep thinking; the answer pops up when it's ready
-      else if (*shown && turns) mode = CH_REPLY;
-      else wantClose = 1;
+    else if (esc) { // gone at once; questions still being answered bring it back when their answer arrives
+      readyAtHide = readyN;
+      if (waiting) mode = CH_WAIT; else wantClose = 1;
     }
     if (autoSend) { send = 1; autoSend = 0; }
     char *p = input; while (*p == ' ' || *p == '\n') p++;
@@ -289,7 +312,7 @@ int chat_frame(double dt, float ax, float ay, float jr, const float tint[3]) {
     if (kn) { if (cur < nseen - 1) show_at(cur + 1); else take_next(); }
     else if (kp) show_at(cur - 1);
     else if (kr) { mode = CH_INPUT; focusInput = 1; grabNow = 1; }
-    else if (esc) { if (waiting || readyN) mode = CH_WAIT; else wantClose = 1; } // unanswered questions: keep them coming
+    else if (esc) { readyAtHide = readyN; if (waiting) mode = CH_WAIT; else wantClose = 1; } // gone at once
   }
   ImVec2_c ws = igGetWindowSize();
   overItem = igGetHoveredID() != 0 || igIsAnyItemActive() || igIsAnyItemHovered();
@@ -313,8 +336,8 @@ int chat_frame(double dt, float ax, float ay, float jr, const float tint[3]) {
     wantClose = 0;
     hide();
     mode = CH_HIDDEN; shown[0] = shownQ[0] = shownHow[0] = 0;
-    forget_seen(); userPlaced = 0; // a new conversation starts next to the jelly again
-    llm_end_session(); // one conversation at a time: closing ends it
+    forget_seen(); userPlaced = 0; // next time it opens next to the jelly again
+    if (llm_cfg()->memoryMins <= 0) llm_end_session(); // (otherwise Jelly remembers the conversation for a while)
     out |= CHAT_CLOSED;
   }
   return out;
